@@ -391,19 +391,14 @@ def ssd_model_fn(features, labels, mode, params):
             # print_op1 = tf.print("cls:", logits, cls_targets, output_stream=sys.stdout)
             # with tf.control_dependencies([print_op1]):
             # Calculate loss, which includes softmax cross entropy and L2 regularization.
-            print(logits, cls_targets, weights)
-            exit('print cls_targets')
             cross_entropy = tf.losses.sparse_softmax_cross_entropy(
                 logits=logits, labels=cls_targets, weights=weights) * loss_weights[0]
-            # Create a tensor named cross_entropy for logging purposes.
-            tf.identity(cross_entropy, name='cross_entropy')
-            tf.summary.scalar('cross_entropy', 2*cross_entropy)
-            total_loss = cross_entropy 
-
+        total_loss = cross_entropy 
+            
         if FLAGS.location_feature_stage:
             with tf.variable_scope('DSNT'):
-                inputs_shape_hw = FLAGS.train_image_size / 4
-                kernel = np.range(inputs_shape_hw)
+                inputs_shape_hw = int(FLAGS.train_image_size / 4)
+                kernel = np.arange(inputs_shape_hw)
                 kernel = kernel / (inputs_shape_hw-1.) - 0.5
                 X = np.tile(kernel, [inputs_shape_hw, 1])
                 Y = np.transpose(X, [1,0])
@@ -417,8 +412,8 @@ def ssd_model_fn(features, labels, mode, params):
                     inputs = tf.reshape(inputs, [-1, inputs_shape_hw**2, 9])
                     inputs = tf.nn.softmax(inputs, 1)
                     print(X, inputs)
-                    xs = tf.math.reduce_sum(X*inputs, 1, keepdims=True) #B*1*C
-                    ys = tf.math.reduce_sum(Y*inputs, 1, keepdims=True) #B*1*C
+                    xs = tf.reduce_sum(X*inputs, 1, keepdims=True) #B*1*C
+                    ys = tf.reduce_sum(Y*inputs, 1, keepdims=True) #B*1*C
                     eyes.append( tf.concat([xs,ys], 1) )                #B*2*C
                 location = tf.concat(eyes, 1)   # B*4*C
 
@@ -436,11 +431,6 @@ def ssd_model_fn(features, labels, mode, params):
                 loc_loss2 = tf.losses.absolute_difference(
                     labels=tf.reshape(loc_targets,[-1,36]), predictions=tf.reshape(location_final,[-1,36]), 
                     weights=weights) * loss_weights[2]
-                
-                tf.identity(loc_loss1, name='loc_loss1')
-                tf.summary.scalar('loc_loss1', loc_loss1)
-                tf.identity(loc_loss2, name='loc_loss2')
-                tf.summary.scalar('loc_loss2', loc_loss2)
             # print_op3 = tf.print("loss:", total_loss, loc_loss1, loc_loss2, output_stream=sys.stdout)
             # with tf.control_dependencies([print_op3]):
 
@@ -448,8 +438,16 @@ def ssd_model_fn(features, labels, mode, params):
             total_loss = (total_loss) + (loc_loss1) + loc_loss2
             # total_loss = tf.stop_gradient(total_loss) + tf.stop_gradient(loc_loss1) + loc_loss2
             # total_loss = total_loss + loc_loss1 + tf.stop_gradient(loc_loss2)
-            tf.identity(total_loss, name='total_loss')
-            tf.summary.scalar('total_loss', total_loss)
+
+    # Create a tensor named cross_entropy for logging purposes.
+    tf.identity(cross_entropy, name='cross_entropy')
+    tf.summary.scalar('cross_entropy', cross_entropy)
+    tf.identity(loc_loss1, name='loc_loss1')
+    tf.summary.scalar('loc_loss1', loc_loss1)
+    tf.identity(loc_loss2, name='loc_loss2')
+    tf.summary.scalar('loc_loss2', loc_loss2)
+    tf.identity(total_loss, name='total_loss')
+    tf.summary.scalar('total_loss', total_loss)
 
     if mode == tf.estimator.ModeKeys.TRAIN:
         global_step = tf.train.get_or_create_global_step()
