@@ -191,17 +191,25 @@ def unwhiten_image(image, output_rgb=True):
     channels[i] += means[i]
   return tf.concat(axis=2, values=channels)
 
-def random_flip_left_right(image):
+def random_flip_left_right(image, location):
   with tf.name_scope('random_flip_left_right'):
-    float_width = tf.to_float(_ImageDimensions(image, rank=3)[1])
-
+    # float_width = tf.to_float(_ImageDimensions(image, rank=3)[1])
     uniform_random = tf.random_uniform([], 0, 1.0)
     mirror_cond = tf.less(uniform_random, .5)
     # Flip image.
     result = tf.cond(mirror_cond, lambda: tf.image.flip_left_right(image), lambda: image)
-    return result
+    # Flip location.
+    def mirror_loc(loc):
+      return [1.-loc[0], loc[1]]
+      # return tf.stack([1.-loc[0], loc[1]], axis=-1)
+    ## Change location
+    mirror_location = map(mirror_loc, location)
+    ## Flip left and right
+    mirror_location = [mirror_location[1], mirror_location[0]]
+    location = tf.cond(mirror_cond, lambda: mirror_location, lambda: location)
+    return result, location
 
-def preprocess_for_train(image, out_shape, data_format='channels_first', scope='ssd_preprocessing_train', output_rgb=True):
+def preprocess_for_train(image, location, out_shape, data_format='channels_first', scope='ssd_preprocessing_train', output_rgb=True):
   """Preprocesses the given image for training.
 
   Args:
@@ -213,7 +221,7 @@ def preprocess_for_train(image, out_shape, data_format='channels_first', scope='
   Returns:
     A preprocessed image.
   """
-  with tf.name_scope(scope, 'cls_preprocessing_train', [image]):
+  with tf.name_scope(scope, 'preprocessing_train', [image]):
     if image.get_shape().ndims != 3:
       raise ValueError('Input must be of size [height, width, C>0]')
     # Convert to float scaled [0, 1].
@@ -227,7 +235,7 @@ def preprocess_for_train(image, out_shape, data_format='channels_first', scope='
                                           num_cases=4)
 
     # Randomly flip the image horizontally.
-    random_sample_flip_image = random_flip_left_right(distort_image)
+    random_sample_flip_image, location = random_flip_left_right(distort_image, location)
     # Rescale to VGG input scale.
     height, width, _ = _ImageDimensions(random_sample_flip_image, rank=3)
     float_height, float_width = tf.to_float(height), tf.to_float(width)
@@ -245,7 +253,7 @@ def preprocess_for_train(image, out_shape, data_format='channels_first', scope='
       final_image = tf.stack([image_channels[2], image_channels[1], image_channels[0]], axis=-1, name='merge_bgr')
     if data_format == 'channels_first':
       final_image = tf.transpose(final_image, perm=(2, 0, 1))
-    return final_image
+    return final_image, location
 
 def preprocess_for_eval(image, out_shape, data_format='channels_first', scope='ssd_preprocessing_eval', output_rgb=True):
   """Preprocesses the given image for evaluation.
@@ -258,7 +266,7 @@ def preprocess_for_eval(image, out_shape, data_format='channels_first', scope='s
     A preprocessed image.
   """
   print(image, out_shape)
-  with tf.name_scope(scope, 'cls_preprocessing_eval', [image]):
+  with tf.name_scope(scope, 'preprocessing_eval', [image]):
     image = tf.to_float(image)
     if out_shape is not None:
       image = tf.image.resize_images(image, out_shape, method=tf.image.ResizeMethod.BILINEAR, align_corners=False)
@@ -276,7 +284,7 @@ def preprocess_for_eval(image, out_shape, data_format='channels_first', scope='s
       image = tf.transpose(image, perm=(2, 0, 1))
     return image
 
-def preprocess_image(image, out_shape, is_training=False, data_format='channels_first', output_rgb=True):
+def preprocess_image(image, location, out_shape, is_training=False, data_format='channels_first', output_rgb=True):
   """Preprocesses the given image.
 
   Args:
@@ -291,6 +299,6 @@ def preprocess_image(image, out_shape, is_training=False, data_format='channels_
     A preprocessed image.
   """
   if is_training:
-    return preprocess_for_train(image, out_shape, data_format=data_format, output_rgb=output_rgb)
+    return preprocess_for_train(image, location, out_shape, data_format=data_format, output_rgb=output_rgb)
   else:
-    return preprocess_for_eval(image, out_shape, data_format=data_format, output_rgb=output_rgb)
+    return preprocess_for_eval(image, out_shape, data_format=data_format, output_rgb=output_rgb), location

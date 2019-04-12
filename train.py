@@ -18,10 +18,13 @@ from __future__ import print_function
 
 import os
 import sys
+import numpy as np
 
 import tensorflow as tf
+slim = tf.contrib.slim
+import logging
 
-from net import cls_net
+from net import cls_reg_net as cls_net
 
 from dataset import dataset_common
 from preprocessing import cls_preprocessing
@@ -29,7 +32,7 @@ from utility import scaffolds
 
 # hardware related configuration
 tf.app.flags.DEFINE_integer(
-    'num_readers', 8,
+    'num_readers', 10,
     'The number of parallel readers that read data from the dataset.')
 tf.app.flags.DEFINE_integer(
     'num_preprocessing_threads', 24,
@@ -41,12 +44,18 @@ tf.app.flags.DEFINE_float(
     'gpu_memory_fraction', 1., 'GPU memory fraction to use.')
 # scaffold related configuration
 tf.app.flags.DEFINE_string(
-    'data_dir', './dataset/tfrecords/test0.2',
+    'data_dir', './dataset/tfrecords',
+    'The directory where the dataset input data is stored.')
+tf.app.flags.DEFINE_string(
+    'cls_data_dir', 'multi-task/9p/CEW',
+    'The directory where the dataset input data is stored.')
+tf.app.flags.DEFINE_string(
+    'reg_data_dir', 'multi-task/9p/MUCT',
     'The directory where the dataset input data is stored.')
 tf.app.flags.DEFINE_integer(
     'num_classes', 2, 'Number of classes to use in the dataset.')
 tf.app.flags.DEFINE_string(
-    'model_dir', './test0.2/logs4/',
+    'model_dir', './models/multitask/18_atten_9p',
     'The directory where the model will be stored.')
 tf.app.flags.DEFINE_integer(
     'log_every_n_steps', 10,
@@ -58,7 +67,7 @@ tf.app.flags.DEFINE_integer(
     'save_checkpoints_secs', 7200, # not used
     'The frequency with which the model is saved, in seconds.')
 tf.app.flags.DEFINE_integer(
-    'save_checkpoints_steps', 50,
+    'save_checkpoints_steps', 5000,
     'The frequency with which the model is saved, in steps.')
 # model related configuration
 ## resnet settings
@@ -66,11 +75,14 @@ tf.app.flags.DEFINE_integer(
     'resnet_version', 2,
     'The version of used resnet, default is v2.')
 tf.app.flags.DEFINE_integer(
-    'resnet_size', 4,
+    'resnet_size', 18,
     'The layers of used resnet, [4,6,10,14,18,34,50,101,152,200].')
 tf.app.flags.DEFINE_boolean(
-    'attention_block', False,
+    'attention_block', True,
     'Use attention or not. True/False')
+tf.app.flags.DEFINE_boolean(
+    'location_feature_stage', 1,
+    'The largest feature map used to location the pupil. [0,1,2,3,4,5]or[-1,-2,-3] or None means not to reg')
 ## other settings
 tf.app.flags.DEFINE_integer(
     'train_image_size', 224,
@@ -78,9 +90,6 @@ tf.app.flags.DEFINE_integer(
 tf.app.flags.DEFINE_integer(
     'train_epochs', None,
     'The number of epochs to use for training.')
-tf.app.flags.DEFINE_integer(
-    'max_number_of_steps', 10000,
-    'The max number of steps to use for training.')
 tf.app.flags.DEFINE_integer(
     'batch_size', 16*2,
     'Batch size for training and evaluation.')
@@ -100,7 +109,7 @@ tf.app.flags.DEFINE_string(
 tf.app.flags.DEFINE_integer(
     'tf_random_seed', 20180503, 'Random seed for TensorFlow initializers.')
 tf.app.flags.DEFINE_float(
-    'weight_decay', 5e-4, 'The weight decay on the model weights.')
+    'weight_decay', 5e-5, 'The weight decay on the model weights.')
 tf.app.flags.DEFINE_float(
     'momentum', 0.9,
     'The momentum for the MomentumOptimizer and RMSPropOptimizer.')
@@ -111,14 +120,23 @@ tf.app.flags.DEFINE_float(
     'The minimal end learning rate used by a polynomial decay learning rate.')
 # for learning rate piecewise_constant decay
 tf.app.flags.DEFINE_string(
-    'decay_boundaries', '50, 5000, 8000',
+    'decay_boundaries', '15000, 20000, 25000, 30000, 35000',
     'Learning rate decay boundaries by global_step (comma-separated list).')
 tf.app.flags.DEFINE_string(
-    'lr_decay_factors', '1, 1, 0.1, 0.01',
+    'lr_decay_factors', '1, 0.1, 0.01, 1, 0.1, 0.01',
     'The values of learning_rate decay factor for each segment between boundaries (comma-separated list).')
+# tf.app.flags.DEFINE_string(
+#     'decay_boundaries', ' 5000, 10000',
+#     'Learning rate decay boundaries by global_step (comma-separated list).')
+# tf.app.flags.DEFINE_string(
+#     'lr_decay_factors', '1, 0.1, 0.01',
+#     'The values of learning_rate decay factor for each segment between boundaries (comma-separated list).')
+tf.app.flags.DEFINE_integer(
+    'max_number_of_steps', 15000,
+    'The max number of steps to use for training.')
 # checkpoint related configuration
 tf.app.flags.DEFINE_string(
-    'checkpoint_path', './model',
+    'checkpoint_path', './models/multitask/18_atten_9p/step1/model.ckpt-25000',
     'The path to a checkpoint from which to fine-tune.')
 tf.app.flags.DEFINE_string(
     'checkpoint_model_scope', 'vgg_16',
@@ -127,7 +145,7 @@ tf.app.flags.DEFINE_string(
     'model_scope', 'ssd300',
     'Model scope name used to replace the name_scope in checkpoint.')
 tf.app.flags.DEFINE_string(
-    'checkpoint_exclude_scopes', 'ssd300/multibox_head, ssd300/additional_layers, ssd300/conv4_3_scale',
+    'checkpoint_exclude_scopes', 'ssd300/REG/second_loc',
     'Comma-separated list of scopes of variables to exclude when restoring from a checkpoint.')
 tf.app.flags.DEFINE_boolean(
     'ignore_missing_vars', True,
@@ -135,6 +153,10 @@ tf.app.flags.DEFINE_boolean(
 tf.app.flags.DEFINE_boolean(
     'multi_gpu', True,
     'Whether there is GPU to use for training.')
+tf.app.flags.DEFINE_string(
+    'loss_weights', '1, 2, 0',
+    'training step'
+)
 
 FLAGS = tf.app.flags.FLAGS
 #CUDA_VISIBLE_DEVICES
@@ -165,6 +187,83 @@ def validate_batch_size_for_multi_gpu(batch_size):
         return num_gpus
     return 0
 
+def init_variables_from_checkpoint(checkpoint_exclude_scopes=None):
+    """Variable initialization form a given checkpoint path.
+    
+    Modified from:
+        https://github.com/tensorflow/models/blob/master/research/
+        object_detection/model_lib.py
+    
+    Note that the init_fn is only run when initializing the model during the 
+    very first global step.
+    
+    Args:
+        checkpoint_exclude_scopes: Comma-separated list of scopes of variables
+            to exclude when restoring from a checkpoint.
+    """
+    exclude_patterns = None
+    if checkpoint_exclude_scopes:
+        exclude_patterns = [scope.strip() for scope in 
+                            checkpoint_exclude_scopes.split(',')]
+    variables_to_restore = tf.global_variables()
+    variables_to_restore.append(slim.get_or_create_global_step())
+    variables_to_init = tf.contrib.framework.filter_variables(
+        variables_to_restore, exclude_patterns=exclude_patterns)
+    variables_to_init_dict = {var.op.name: var for var in variables_to_init}
+    
+    available_var_map = get_variables_available_in_checkpoint(
+        variables_to_init_dict, FLAGS.checkpoint_path, 
+        include_global_step=False)
+    tf.train.init_from_checkpoint(FLAGS.checkpoint_path, available_var_map)
+    
+    
+def get_variables_available_in_checkpoint(variables,
+                                          checkpoint_path,
+                                          include_global_step=True):
+    """Returns the subset of variables in the checkpoint.
+    
+    Inspects given checkpoint and returns the subset of variables that are
+    available in it.
+    
+    Args:
+        variables: A dictionary of variables to find in checkpoint.
+        checkpoint_path: Path to the checkpoint to restore variables from.
+        include_global_step: Whether to include `global_step` variable, if it
+            exists. Default True.
+            
+    Returns:
+        A dictionary of variables.
+        
+    Raises:
+        ValueError: If `variables` is not a dict.
+    """
+    if not isinstance(variables, dict):
+        raise ValueError('`variables` is expected to be a dict.')
+    
+    # Available variables
+    ckpt_reader = tf.train.NewCheckpointReader(checkpoint_path)
+    ckpt_vars_to_shape_map = ckpt_reader.get_variable_to_shape_map()
+    if not include_global_step:
+        ckpt_vars_to_shape_map.pop(tf.GraphKeys.GLOBAL_STEP, None)
+    vars_in_ckpt = {}
+    for variable_name, variable in sorted(variables.items()):
+        if variable_name in ckpt_vars_to_shape_map:
+            if ckpt_vars_to_shape_map[variable_name] == variable.shape.as_list():
+                vars_in_ckpt[variable_name] = variable
+            else:
+                logging.warning('Variable [%s] is avaible in checkpoint, but '
+                                'has an incompatible shape with model '
+                                'variable. Checkpoint shape: [%s], model '
+                                'variable shape: [%s]. This variable will not '
+                                'be initialized from the checkpoint.',
+                                variable_name, 
+                                ckpt_vars_to_shape_map[variable_name],
+                                variable.shape.as_list())
+        else:
+            logging.warning('Variable [%s] is not available in checkpoint',
+                            variable_name)
+    return vars_in_ckpt
+
 # def get_init_fn():
 #     return scaffolds.get_init_fn_for_scaffold(FLAGS.model_dir, FLAGS.checkpoint_path,
 #                                             FLAGS.model_scope, FLAGS.checkpoint_model_scope,
@@ -174,12 +273,41 @@ def validate_batch_size_for_multi_gpu(batch_size):
 def input_pipeline(dataset_pattern='train-*', is_training=True, batch_size=FLAGS.batch_size):
     def input_fn():
         target_shape = [FLAGS.train_image_size] * 2
-        image_preprocessing_fn = lambda image_: cls_preprocessing.preprocess_image(image_, target_shape, 
+        image_preprocessing_fn = lambda image_, label_: cls_preprocessing.preprocess_image(image_, label_, target_shape, 
                                                                     is_training=is_training, data_format=FLAGS.data_format, 
                                                                     output_rgb=False)
-        
-        image, _, cls_targets = dataset_common.slim_get_batch(FLAGS.num_classes,
-                                                            batch_size,
+        if FLAGS.location_feature_stage:
+            _batch_size = int(batch_size/2)
+            print('Use cls and reg, so the batch size of each task is {}'.format(_batch_size))
+            image1, _, cls_targets1, points1, is_reg1 = dataset_common.slim_get_batch(
+                                                            FLAGS.num_classes,
+                                                            _batch_size,
+                                                            ('train' if is_training else 'val'),
+                                                            os.path.join(FLAGS.data_dir, FLAGS.cls_data_dir, dataset_pattern),
+                                                            int(FLAGS.num_readers/2),
+                                                            int(FLAGS.num_preprocessing_threads/2),
+                                                            image_preprocessing_fn,
+                                                            num_epochs=FLAGS.train_epochs,
+                                                            is_training=is_training)
+            image2, _, cls_targets2, points2, is_reg2 = dataset_common.slim_get_batch(
+                                                            FLAGS.num_classes,
+                                                            _batch_size,
+                                                            ('train' if is_training else 'val'),
+                                                            os.path.join(FLAGS.data_dir, FLAGS.reg_data_dir, dataset_pattern),
+                                                            int(FLAGS.num_readers/2),
+                                                            int(FLAGS.num_preprocessing_threads/2),
+                                                            image_preprocessing_fn,
+                                                            num_epochs=FLAGS.train_epochs,
+                                                            is_training=is_training)
+            image, cls_targets, points, is_reg = [tf.concat([image1, image2],axis=0),
+                                                            tf.concat([cls_targets1, cls_targets2],axis=0),
+                                                            tf.concat([points1, points2],axis=0),
+                                                            tf.concat([is_reg1, is_reg2],axis=0),]
+        else:
+            _batch_size = batch_size
+            image, _, cls_targets, points, is_reg = dataset_common.slim_get_batch(
+                                                            FLAGS.num_classes,
+                                                            _batch_size,
                                                             ('train' if is_training else 'val'),
                                                             os.path.join(FLAGS.data_dir, dataset_pattern),
                                                             FLAGS.num_readers,
@@ -188,46 +316,50 @@ def input_pipeline(dataset_pattern='train-*', is_training=True, batch_size=FLAGS
                                                             num_epochs=FLAGS.train_epochs,
                                                             is_training=is_training)
 
-        return image, {'cls_targets': cls_targets}
+        return image, {'cls_targets': cls_targets, 'loc_targets': points, 'is_reg': is_reg}
+        # return image, {'cls_targets': cls_targets, 'loc_targets': tf.squeeze(points,axis=-1), 'is_reg': is_reg}
     return input_fn
 
-# from scipy.misc import imread, imsave, imshow, imresize
-# import numpy as np
-# from utility import draw_toolbox
+def modified_smooth_l1(bbox_pred, bbox_targets, bbox_inside_weights=1., bbox_outside_weights=1., sigma=1.):
+    """
+        ResultLoss = outside_weights * SmoothL1(inside_weights * (bbox_pred - bbox_targets))
+        SmoothL1(x) = 0.5 * (sigma * x)^2,    if |x| < 1 / sigma^2
+                      |x| - 0.5 / sigma^2,    otherwise
+    """
+    with tf.name_scope('smooth_l1', [bbox_pred, bbox_targets]):
+        sigma2 = sigma * sigma
 
-# def save_image_with_bbox(image, labels_, scores_, bboxes_):
-#     if not hasattr(save_image_with_bbox, "counter"):
-#         save_image_with_bbox.counter = 0  # it doesn't exist yet, so initialize it
-#     save_image_with_bbox.counter += 1
+        inside_mul = tf.multiply(bbox_inside_weights, tf.subtract(bbox_pred, bbox_targets))
 
-#     img_to_draw = np.copy(image)
+        smooth_l1_sign = tf.cast(tf.less(tf.abs(inside_mul), 1.0 / sigma2), tf.float32)
+        smooth_l1_option1 = tf.multiply(tf.multiply(inside_mul, inside_mul), 0.5 * sigma2)
+        smooth_l1_option2 = tf.subtract(tf.abs(inside_mul), 0.5 / sigma2)
+        smooth_l1_result = tf.add(tf.multiply(smooth_l1_option1, smooth_l1_sign),
+                                  tf.multiply(smooth_l1_option2, tf.abs(tf.subtract(smooth_l1_sign, 1.0))))
 
-#     img_to_draw = draw_toolbox.bboxes_draw_on_img(img_to_draw, labels_, scores_, bboxes_, thickness=2)
-#     imsave(os.path.join('./debug/{}.jpg').format(save_image_with_bbox.counter), img_to_draw)
-#     return save_image_with_bbox.counter
+        outside_mul = tf.multiply(bbox_outside_weights, smooth_l1_result)
+
+        return outside_mul
 
 def ssd_model_fn(features, labels, mode, params):
     """model_fn for MODLE to be used with our Estimator."""
     cls_targets = labels['cls_targets']
+    print(labels['loc_targets'])
+    loc_targets = labels['loc_targets']
+    is_reg = labels['is_reg']
+
     with tf.variable_scope(params['model_scope'], default_name=None, values=[features], reuse=tf.AUTO_REUSE):
-        # # model = cls_net.Model(
-        # model = cls_net.Att_Model(
-        #             resnet_size=14,
-        #             bottleneck=False,
-        #             num_classes=2,
-        #             num_filters=64,
-        #             kernel_size=7,
-        #             conv_stride=2,
-        #             first_pool_size=3,
-        #             first_pool_stride=2,
-        #             block_sizes=cls_net._get_block_sizes(resnet_size=14),
-        #             block_strides=[1, 2, 2, 2],
-        #             resnet_version=2,
-        #             data_format=params['data_format'],
-        #             dtype=tf.float32)
-        model = cls_net.CLS_Model(FLAGS.resnet_size, FLAGS.resnet_version,
-                                FLAGS.attention_block, FLAGS.data_format)
-        logits = model(features, mode == tf.estimator.ModeKeys.TRAIN)
+        model = cls_net.CLS_REG_Model(FLAGS.resnet_size, FLAGS.resnet_version,
+                                FLAGS.attention_block, FLAGS.location_feature_stage, FLAGS.data_format)
+        results = model(features, mode == tf.estimator.ModeKeys.TRAIN)
+        if FLAGS.location_feature_stage:
+            logits, loc, location = results
+        else:
+            logits = results
+
+    if mode == tf.estimator.ModeKeys.TRAIN:
+        if FLAGS.checkpoint_path:
+            init_variables_from_checkpoint(FLAGS.checkpoint_exclude_scopes)
 
     # This acts as a no-op if the logits are already in fp32 (provided logits are
     # not a SparseTensor). If dtype is is low precision, logits must be cast to
@@ -238,7 +370,6 @@ def ssd_model_fn(features, labels, mode, params):
         'classes': tf.argmax(logits, axis=1),
         'probabilities': tf.nn.softmax(logits, name='softmax_tensor')
     }
-
     if mode == tf.estimator.ModeKeys.PREDICT:
         # Return the predictions and the specification for serving a SavedModel
         return tf.estimator.EstimatorSpec(
@@ -248,14 +379,77 @@ def ssd_model_fn(features, labels, mode, params):
                 'predict': tf.estimator.export.PredictOutput(predictions)
             })
 
-    # Calculate loss, which includes softmax cross entropy and L2 regularization.
-    cross_entropy = tf.losses.sparse_softmax_cross_entropy(
-        logits=logits, labels=cls_targets)
+    with tf.variable_scope('losses'):
+        loss_weights = parse_comma_list(FLAGS.loss_weights)
+        with tf.variable_scope('cls_loss'):
+            if FLAGS.location_feature_stage:
+                weights = 1 - is_reg
+                cls_targets = tf.expand_dims(weights,axis=-1) * cls_targets
+            else:
+                weights = 1.0
 
-    # Create a tensor named cross_entropy for logging purposes.
-    tf.identity(cross_entropy, name='cross_entropy')
-    tf.summary.scalar('cross_entropy', cross_entropy)
-    total_loss = cross_entropy
+            # print_op1 = tf.print("cls:", logits, cls_targets, output_stream=sys.stdout)
+            # with tf.control_dependencies([print_op1]):
+            # Calculate loss, which includes softmax cross entropy and L2 regularization.
+            print(logits, cls_targets, weights)
+            exit('print cls_targets')
+            cross_entropy = tf.losses.sparse_softmax_cross_entropy(
+                logits=logits, labels=cls_targets, weights=weights) * loss_weights[0]
+            # Create a tensor named cross_entropy for logging purposes.
+            tf.identity(cross_entropy, name='cross_entropy')
+            tf.summary.scalar('cross_entropy', 2*cross_entropy)
+            total_loss = cross_entropy 
+
+        if FLAGS.location_feature_stage:
+            with tf.variable_scope('DSNT'):
+                inputs_shape_hw = FLAGS.train_image_size / 4
+                kernel = np.range(inputs_shape_hw)
+                kernel = kernel / (inputs_shape_hw-1.) - 0.5
+                X = np.tile(kernel, [inputs_shape_hw, 1])
+                Y = np.transpose(X, [1,0])
+                # channel_last format
+                X = np.reshape(X, [1, -1, 1])
+                Y = np.reshape(Y, [1, -1, 1])
+
+                eyes = []
+                for inputs in location:
+                    # inputs: channel_last format
+                    inputs = tf.reshape(inputs, [-1, inputs_shape_hw**2, 9])
+                    inputs = tf.nn.softmax(inputs, 1)
+                    print(X, inputs)
+                    xs = tf.math.reduce_sum(X*inputs, 1, keepdims=True) #B*1*C
+                    ys = tf.math.reduce_sum(Y*inputs, 1, keepdims=True) #B*1*C
+                    eyes.append( tf.concat([xs,ys], 1) )                #B*2*C
+                location = tf.concat(eyes, 1)   # B*4*C
+
+            weights = tf.expand_dims(is_reg,axis=-1)
+            # print_op2 = tf.print("reg:", loc,location,loc_targets, output_stream=sys.stdout)
+            # weights = tf.concat([tf.zeros([int(FLAGS.batch_size/2)]), tf.ones(int(FLAGS.batch_size/2))], axis=0)
+            # with tf.control_dependencies([print_op2]):
+            with tf.variable_scope('reg_loss'):
+                coarse_label = loc_targets[:,:,-1] # b*[lx, ly, rx, ry]
+                loc_loss1 = tf.losses.absolute_difference(
+                    labels=coarse_label, predictions=loc, weights=weights) * loss_weights[1]
+
+                loc_stop = tf.stop_gradient(loc)
+                location_final = tf.expand_dims(loc_stop,-1) + 0.25*location
+                loc_loss2 = tf.losses.absolute_difference(
+                    labels=tf.reshape(loc_targets,[-1,36]), predictions=tf.reshape(location_final,[-1,36]), 
+                    weights=weights) * loss_weights[2]
+                
+                tf.identity(loc_loss1, name='loc_loss1')
+                tf.summary.scalar('loc_loss1', loc_loss1)
+                tf.identity(loc_loss2, name='loc_loss2')
+                tf.summary.scalar('loc_loss2', loc_loss2)
+            # print_op3 = tf.print("loss:", total_loss, loc_loss1, loc_loss2, output_stream=sys.stdout)
+            # with tf.control_dependencies([print_op3]):
+
+            # Reset the total_loss.
+            total_loss = (total_loss) + (loc_loss1) + loc_loss2
+            # total_loss = tf.stop_gradient(total_loss) + tf.stop_gradient(loc_loss1) + loc_loss2
+            # total_loss = total_loss + loc_loss1 + tf.stop_gradient(loc_loss2)
+            tf.identity(total_loss, name='total_loss')
+            tf.summary.scalar('total_loss', total_loss)
 
     if mode == tf.estimator.ModeKeys.TRAIN:
         global_step = tf.train.get_or_create_global_step()
@@ -294,9 +488,10 @@ def parse_comma_list(args):
 def main(_):
     # Using the Winograd non-fused algorithms provides a small performance boost.
     os.environ['TF_ENABLE_WINOGRAD_NONFUSED'] = '1'
-    os.environ['CUDA_VISIBLE_DEVICES'] = '5'
+    # os.environ['CUDA_VISIBLE_DEVICES'] = '5'
 
-    gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=FLAGS.gpu_memory_fraction)
+    # gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=FLAGS.gpu_memory_fraction)
+    gpu_options = tf.GPUOptions(allow_growth = True)
     config = tf.ConfigProto(allow_soft_placement=True, log_device_placement=False, intra_op_parallelism_threads=FLAGS.num_cpu_threads, inter_op_parallelism_threads=FLAGS.num_cpu_threads, gpu_options=gpu_options)
 
     num_gpus = validate_batch_size_for_multi_gpu(FLAGS.batch_size)
@@ -332,7 +527,10 @@ def main(_):
         })
     tensors_to_log = {
         'lr': 'learning_rate',
-        'ce': 'cross_entropy',
+        'loss-ce': 'cross_entropy',
+        'loss-loc1': 'loc_loss1',
+        'loss-loc2': 'loc_loss2',
+        'total-loss': 'total_loss'
     }
     logging_hook = tf.train.LoggingTensorHook(tensors=tensors_to_log, every_n_iter=FLAGS.log_every_n_steps,
                                             formatter=lambda dicts: (', '.join(['%s=%.6f' % (k, v) for k, v in dicts.items()])))

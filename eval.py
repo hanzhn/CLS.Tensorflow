@@ -23,8 +23,9 @@ import tensorflow as tf
 
 import numpy as np
 from scipy.misc import imread, imsave, imshow, imresize
+import cv2
 
-from net import cls_net
+from net import cls_reg_net
 
 from dataset import dataset_common
 from preprocessing import cls_preprocessing
@@ -44,12 +45,12 @@ tf.app.flags.DEFINE_float(
     'gpu_memory_fraction', 0.1, 'GPU memory fraction to use.')
 # scaffold related configuration
 tf.app.flags.DEFINE_string(
-    'data_dir', './dataset/tfrecords/test0.2',
+    'data_dir', './dataset/tfrecords/multi-task/9p/CEW',
     'The directory where the dataset input data is stored.')
 tf.app.flags.DEFINE_integer(
     'num_classes', 2, 'Number of classes to use in the dataset.')
 tf.app.flags.DEFINE_string(
-    'model_dir', './test0.2/logs4att/',
+    'model_dir', './models/multitask/18_atten_9p',
     'The directory where the model will be stored.')
 tf.app.flags.DEFINE_integer(
     'log_every_n_steps', 10,
@@ -60,11 +61,14 @@ tf.app.flags.DEFINE_integer(
     'resnet_version', 2,
     'The version of used resnet, default is v2.')
 tf.app.flags.DEFINE_integer(
-    'resnet_size', 4,
+    'resnet_size', 18,
     'The layers of used resnet, [4,6,10,14,18,34,50,101,152,200].')
 tf.app.flags.DEFINE_boolean(
     'attention_block', True,
     'Use attention or not. True/False')
+tf.app.flags.DEFINE_boolean(
+    'location_feature_stage', 1,
+    'The largest feature map used to location the pupil. [0,1,2,3,4,5]or[-1,-2,-3] or None means not to reg')
 ## other settings
 tf.app.flags.DEFINE_integer(
     'batch_size', 1,
@@ -90,7 +94,7 @@ tf.app.flags.DEFINE_string(
 #     'keep_topk', 400, 'Number of total object to keep for each image before nms.')
 # checkpoint related configuration
 tf.app.flags.DEFINE_string(
-    'checkpoint_path', './model',
+    'checkpoint_path', './models/multitask/9p/18_atten',
     'The path to a checkpoint from which to fine-tune.')
 tf.app.flags.DEFINE_string(
     'model_scope', 'ssd300',
@@ -116,19 +120,20 @@ def input_pipeline(dataset_pattern='val-*', is_training=False, batch_size=FLAGS.
     def input_fn():
         assert batch_size==1, 'We only support single batch when evaluation.'
         target_shape = [FLAGS.train_image_size] * 2
-        image_preprocessing_fn = lambda image_,: cls_preprocessing.preprocess_image(image_, target_shape, is_training=is_training, data_format=FLAGS.data_format, output_rgb=False)
-
-        image, filename, label = dataset_common.slim_get_batch(FLAGS.num_classes,
-                                                                            batch_size,
-                                                                            ('train' if is_training else 'val'),
-                                                                            os.path.join(FLAGS.data_dir, dataset_pattern),
-                                                                            FLAGS.num_readers,
-                                                                            FLAGS.num_preprocessing_threads,
-                                                                            image_preprocessing_fn,
-                                                                            num_epochs=1,
-                                                                            is_training=is_training)
-
-        return {'image': image, 'filename': filename, 'label': label}, None
+        image_preprocessing_fn = lambda image_, label_: cls_preprocessing.preprocess_image(image_, label_, target_shape, 
+                                                                    is_training=is_training, data_format=FLAGS.data_format, 
+                                                                    output_rgb=False)
+        image, filename, label, points, is_reg = dataset_common.slim_get_batch(
+                                                            FLAGS.num_classes,
+                                                            batch_size,
+                                                            ('train' if is_training else 'val'),
+                                                            os.path.join(FLAGS.data_dir, dataset_pattern),
+                                                            FLAGS.num_readers,
+                                                            FLAGS.num_preprocessing_threads,
+                                                            image_preprocessing_fn,
+                                                            num_epochs=1,
+                                                            is_training=is_training)
+        return {'image': image, 'filename': filename, 'label': label, 'points':points, 'is_reg': is_reg}, None
     return input_fn
 
 def ssd_model_fn(features, labels, mode, params):
@@ -136,16 +141,27 @@ def ssd_model_fn(features, labels, mode, params):
     filename = features['filename']
     label = features['label']
     image = features['image']
+    points = features['points']
+    is_reg = features['is_reg']
+    points2 = points[:,:,-1]
 
     filename = tf.identity(filename, name='filename')
     with tf.variable_scope(params['model_scope'], default_name=None, values=[image], reuse=tf.AUTO_REUSE):
-        model = cls_net.CLS_Model(FLAGS.resnet_size, FLAGS.resnet_version,
-                                FLAGS.attention_block, FLAGS.data_format)
-        logits = model(image, mode == tf.estimator.ModeKeys.TRAIN)
+        model = cls_reg_net.CLS_REG_Model(FLAGS.resnet_size, FLAGS.resnet_version,
+                                FLAGS.attention_block, FLAGS.location_feature_stage, FLAGS.data_format)
+        results = model(image, training=(mode==tf.estimator.ModeKeys.TRAIN))
+        if FLAGS.location_feature_stage:
+            logits, loc, location = results
+            loc = tf.reshape(loc, [-1, 4, 1])
+            location = tf.reshape(location, [-1, 4, 9])
+            location = loc + location*0.25
+        else:
+            logits = results
 
     # This acts as a no-op if the logits are already in fp32 (provided logits are
     # not a SparseTensor). If dtype is is low precision, logits must be cast to
     # fp32 for numerical stability.
+
     logits = tf.cast(logits, tf.float32)
 
     # save_image_op = tf.py_func(save_image_with_label,
@@ -159,7 +175,12 @@ def ssd_model_fn(features, labels, mode, params):
         'classes': tf.argmax(logits, axis=1),
         'probabilities': tf.nn.softmax(logits, name='softmax_tensor'),
         'label': label,
-        'filename': filename
+        'filename': filename,
+        'loc': loc,
+        'location': location,
+        'points': points,
+        'points2': points2,
+        'image': image
     }
     # tf.summary.image('att_map', att_map)
 
@@ -177,10 +198,20 @@ def ssd_model_fn(features, labels, mode, params):
 def parse_comma_list(args):
     return [float(s.strip()) for s in args.split(',')]
 
+def distance(a, b):
+    dis = (a[0]-b[0])**2 + (a[1]-b[1])**2
+    return pow(dis, 1./2.)
+
+def d_eye(loc, points):
+    dl = distance(loc[:2], points[:2])
+    dr = distance(loc[2:], points[2:])
+    dcc = distance(points[:2], points[2:])
+    return max(dl, dr)/dcc
+
 def main(_):
     # Using the Winograd non-fused algorithms provides a small performance boost.
     os.environ['TF_ENABLE_WINOGRAD_NONFUSED'] = '1'
-    os.environ['CUDA_VISIBLE_DEVICES'] = '3'
+    # os.environ['CUDA_VISIBLE_DEVICES'] = '3'
 
     gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=FLAGS.gpu_memory_fraction)
     config = tf.ConfigProto(allow_soft_placement=True, log_device_placement=False, intra_op_parallelism_threads=FLAGS.num_cpu_threads, inter_op_parallelism_threads=FLAGS.num_cpu_threads, gpu_options=gpu_options)
@@ -199,11 +230,6 @@ def main(_):
     ssd_detector = tf.estimator.Estimator(
         model_fn=ssd_model_fn, model_dir=FLAGS.model_dir, config=run_config,
         params={
-            # 'select_threshold': FLAGS.select_threshold,
-            # 'min_size': FLAGS.min_size,
-            # 'nms_threshold': FLAGS.nms_threshold,
-            # 'nms_topk': FLAGS.nms_topk,
-            # 'keep_topk': FLAGS.keep_topk,
             'data_format': FLAGS.data_format,
             'batch_size': FLAGS.batch_size,
             'model_scope': FLAGS.model_scope,
@@ -220,18 +246,75 @@ def main(_):
 
     correct = []
     wrong = []
-    print('________',pred_results)
+    deye1 = []
+    deye2 = []
+    # print('________',pred_results)
     for i in pred_results:
+        img = i['image']
         pred = i['classes']
         label = i['label']
         filename = i['filename']
+        loc = i['loc']
+        location = i['location']
+        points9 = i['points']
+        points = i['points2']
+        # print(location)
+        # print(points)
+        # print(loc, location, points)
         if pred == label:
             correct.append(filename)
         else:
             wrong.append(filename)
-    print('correct:',correct,len(correct))
+
+        deye1.append(d_eye(loc.reshape([4]), points))
+        deye2.append(d_eye(location[:,-1].reshape([4]), points))
+
+        # # img = cv2.imread(os.path.join('/data0/hz/BioID_croped/Picture_extracted', filename))
+        # img = cv2.imread(os.path.join('/data0/hz/muct_croped/jpg', filename))
+        # # if FLAGS.data_format=='channels_first':
+        # #     img = np.transpose(img, (1,2,0))
+        # # print(img.shape)
+        # w, h = img.shape[1], img.shape[0]
+
+        # pl = points.reshape([2,2])
+        # pl = pl*[w,h]
+        # pl = pl.astype(np.int64)
+        # for center in pl:
+        #     center = tuple(center)
+        #     cv2.circle(img, center, radius=0, color=(0, 0, 255), thickness=1)
+        # pl = loc.reshape([2,2])
+        # pl = pl*[w,h]
+        # pl = pl.astype(np.int64)
+        # for center in pl:
+        #     center = tuple(center)
+        #     cv2.circle(img, center, radius=0, color=(0, 255, 0), thickness=1)
+        # pl = location.reshape([2,2,9])
+        # pl = np.transpose(pl, (0,2,1))
+        # pl = pl.reshape([18,2])
+        # pl = pl*[w,h]
+        # pl = pl.astype(np.int64)
+        # for center in pl:
+        #     center = tuple(center)
+        #     cv2.circle(img, center, radius=0, color=(255, 0, 0), thickness=1)
+
+        # cv2.imwrite(os.path.join(summary_dir, filename), img)
+            
+
+    # print('correct:',correct,len(correct))
     print('wrong:',wrong,len(wrong))
     print('precision:',float(len(correct))/( len(correct)+len(wrong) ) )
+    print('0.25')
+    print(np.argwhere(np.array(deye1)<0.25).shape[0]/len(deye1))
+    print(np.argwhere(np.array(deye2)<0.25).shape[0]/len(deye2))
+    print('0.10')
+    print(np.argwhere(np.array(deye1)<0.1).shape[0]/len(deye1))
+    print(np.argwhere(np.array(deye2)<0.1).shape[0]/len(deye2))
+    print('0.05')
+    print(np.argwhere(np.array(deye1)<0.05).shape[0]/len(deye1))
+    print(np.argwhere(np.array(deye2)<0.05).shape[0]/len(deye2))
+    print('deye1:', np.mean(deye1))
+    print('deye2:', np.mean(deye2))
+    
 
 
 if __name__ == '__main__':
