@@ -106,3 +106,4 @@ venv.bak/
 # my saved models
 models/
 demo/
+dataset/tfrecords/
