@@ -81,7 +81,7 @@ tf.app.flags.DEFINE_boolean(
     'attention_block', True,
     'Use attention or not. True/False')
 tf.app.flags.DEFINE_boolean(
-    'location_feature_stage', 1,
+    'location_feature_stage', 0,
     'The largest feature map used to location the pupil. [0,1,2,3,4,5]or[-1,-2,-3] or None means not to reg')
 ## other settings
 tf.app.flags.DEFINE_integer(
@@ -145,8 +145,8 @@ tf.app.flags.DEFINE_string(
     'model_scope', 'ssd300',
     'Model scope name used to replace the name_scope in checkpoint.')
 tf.app.flags.DEFINE_string(
-    'checkpoint_exclude_scopes', 'ssd300/REG/second_loc',
-    'Comma-separated list of scopes of variables to exclude when restoring from a checkpoint.')
+    'checkpoint_exclude_scopes', None,
+    'Comma-separated list of scopes of variables to exclude when restoring from a checkpoint. ssd300/REG/second_loc')
 tf.app.flags.DEFINE_boolean(
     'ignore_missing_vars', True,
     'When restoring a checkpoint would ignore missing variables.')
@@ -276,7 +276,7 @@ def input_pipeline(dataset_pattern='train-*', is_training=True, batch_size=FLAGS
         image_preprocessing_fn = lambda image_, label_: cls_preprocessing.preprocess_image(image_, label_, target_shape, 
                                                                     is_training=is_training, data_format=FLAGS.data_format, 
                                                                     output_rgb=False)
-        if FLAGS.location_feature_stage:
+        if FLAGS.location_feature_stage is not None:
             _batch_size = int(batch_size/2)
             print('Use cls and reg, so the batch size of each task is {}'.format(_batch_size))
             image1, _, cls_targets1, points1, is_reg1 = dataset_common.slim_get_batch(
@@ -352,7 +352,7 @@ def ssd_model_fn(features, labels, mode, params):
         model = cls_net.CLS_REG_Model(FLAGS.resnet_size, FLAGS.resnet_version,
                                 FLAGS.attention_block, FLAGS.location_feature_stage, FLAGS.data_format)
         results = model(features, mode == tf.estimator.ModeKeys.TRAIN)
-        if FLAGS.location_feature_stage:
+        if FLAGS.location_feature_stage is not None:
             logits, loc, location = results
         else:
             logits = results
@@ -382,7 +382,7 @@ def ssd_model_fn(features, labels, mode, params):
     with tf.variable_scope('losses'):
         loss_weights = parse_comma_list(FLAGS.loss_weights)
         with tf.variable_scope('cls_loss'):
-            if FLAGS.location_feature_stage:
+            if FLAGS.location_feature_stage is not None:
                 weights = 1 - is_reg
                 cls_targets = tf.expand_dims(weights,axis=-1) * cls_targets
             else:
@@ -395,9 +395,9 @@ def ssd_model_fn(features, labels, mode, params):
                 logits=logits, labels=cls_targets, weights=weights) * loss_weights[0]
         total_loss = cross_entropy 
             
-        if FLAGS.location_feature_stage:
+        if FLAGS.location_feature_stage is not None:
             with tf.variable_scope('DSNT'):
-                inputs_shape_hw = int(FLAGS.train_image_size / 4 *2/7)
+                inputs_shape_hw = int(FLAGS.train_image_size / 2 *2/7)
                 kernel = np.arange(inputs_shape_hw)
                 kernel = kernel / (inputs_shape_hw-1.) - 0.5
                 X = np.tile(kernel, [inputs_shape_hw, 1])

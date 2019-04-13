@@ -526,7 +526,7 @@ class Model(object):
       ValueError: if invalid version is selected.
     """
     self.is_attention = is_attention
-    self.is_regression = True if location_feature_stage else False
+    self.is_regression = True if location_feature_stage is not None else False
     self.location_feature_stage = location_feature_stage
 
     self.resnet_size = resnet_size
