@@ -45,7 +45,7 @@ tf.app.flags.DEFINE_float(
     'gpu_memory_fraction', 0.1, 'GPU memory fraction to use.')
 # scaffold related configuration
 tf.app.flags.DEFINE_string(
-    'data_dir', './dataset/tfrecords/multi-task/9p/BIOID',
+    'data_dir', './dataset/tfrecords/multi-task/9p/CEW',
     'The directory where the dataset input data is stored.')
 tf.app.flags.DEFINE_integer(
     'num_classes', 2, 'Number of classes to use in the dataset.')
