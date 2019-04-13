@@ -113,7 +113,7 @@ def slim_get_batch(num_classes, batch_size, split_name, file_pattern, num_reader
         ['image', 'filename', 'label', 'left_roundx','left_roundy','right_roundx','right_roundy', 'task_type'])
     image, [[leftx, lefty], [rightx, righty]]= image_preprocessing_fn(org_image, [[leftx, lefty], [rightx, righty]])
     # return image
-    tensors_to_batch = [image, filename, glabels_raw, [leftx, lefty, rightx, righty], task_type]
+    tensors_to_batch = [image, filename, glabels_raw, [lefty, leftx, righty, rightx], task_type]
     return tf.train.batch(tensors_to_batch,
                     dynamic_pad=(not is_training),
                     batch_size=batch_size,

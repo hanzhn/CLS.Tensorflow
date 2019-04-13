@@ -45,12 +45,12 @@ tf.app.flags.DEFINE_float(
     'gpu_memory_fraction', 0.1, 'GPU memory fraction to use.')
 # scaffold related configuration
 tf.app.flags.DEFINE_string(
-    'data_dir', './dataset/tfrecords/multi-task/9p/CEW',
+    'data_dir', './dataset/tfrecords/multi-task/9p/BIOID',
     'The directory where the dataset input data is stored.')
 tf.app.flags.DEFINE_integer(
     'num_classes', 2, 'Number of classes to use in the dataset.')
 tf.app.flags.DEFINE_string(
-    'model_dir', './models/multitask/18_atten_9p',
+    'model_dir', './models/multitask/18_atten_9p/step1',
     'The directory where the model will be stored.')
 tf.app.flags.DEFINE_integer(
     'log_every_n_steps', 10,
@@ -151,8 +151,35 @@ def ssd_model_fn(features, labels, mode, params):
                                 FLAGS.attention_block, FLAGS.location_feature_stage, FLAGS.data_format)
         results = model(image, training=(mode==tf.estimator.ModeKeys.TRAIN))
         if FLAGS.location_feature_stage:
-            logits, loc, location = results
-            loc = tf.reshape(loc, [-1, 4, 1])
+            logits, loc_ori, location = results
+            loc = tf.reshape(loc_ori, [-1, 4, 1])
+
+            with tf.variable_scope('DSNT'):
+                inputs_shape_hw = int(FLAGS.train_image_size / 4 *2/7)
+                kernel = np.arange(inputs_shape_hw)
+                kernel = kernel / (inputs_shape_hw-1.) - 0.5
+                X = np.tile(kernel, [inputs_shape_hw, 1])
+                Y = np.transpose(X, [1,0])
+                # channel_last format
+                X = np.reshape(X, [1, -1, 1])
+                Y = np.reshape(Y, [1, -1, 1])
+
+                eyes = []
+                print(location)
+                for inputs in location:
+                    # inputs: channel_last format
+                    # print_op2 = tf.print("location:", inputs, output_stream=sys.stdout)
+                    # with tf.control_dependencies([print_op2]):
+                    # inputs = tf.Print(inputs, [inputs, tf.shape(inputs)])
+                    print(inputs_shape_hw**2, inputs_shape_hw)
+                    inputs = tf.reshape(inputs, [-1, inputs_shape_hw**2, 9])
+                    inputs = tf.nn.softmax(inputs, 1)
+                    # print(X, inputs)
+                    xs = tf.reduce_sum(X*inputs, 1, keepdims=True) #B*1*C
+                    ys = tf.reduce_sum(Y*inputs, 1, keepdims=True) #B*1*C
+                    eyes.append( tf.concat([ys,xs], 1) )                #B*2*C
+                location = tf.concat(eyes, 1)   # B*4*C
+
             location = tf.reshape(location, [-1, 4, 9])
             location = loc + location*0.25
         else:
@@ -171,6 +198,32 @@ def ssd_model_fn(features, labels, mode, params):
     #                     all_bboxes],
     #                     tf.int64, stateful=True)
     # tf.identity(save_image_op, name='save_image_op')
+
+    # tensors to print
+    if FLAGS.data_format=='channels_first':
+        image = tf.transpose(image, (0,2,3,1))
+    image = tf.expand_dims(cls_preprocessing.unwhiten_image(tf.squeeze(image,0), output_rgb=False),0)
+    feature_map_shape = tf.shape(image)
+    feature_map_size = [feature_map_shape[1], feature_map_shape[2]]
+    crop_size = [tf.to_int32(x*2/7) for x in feature_map_size]  # Crop the 1/4 of feature map.
+    crop_centers = tf.split(loc_ori, 2, axis=1) # point_num*[b*2]
+    # crop_centers = tf.split(loc_dence, point_num, axis=1) # point_num*[b*2]
+    patches = []
+    centers = []
+    for center in crop_centers:
+        begin = center - 2/7*0.5
+        end = center + 2/7*0.5
+        boxes = tf.concat([begin, end], axis=1)
+        patch = tf.image.crop_and_resize(
+            image,
+            boxes=boxes,
+            box_ind=tf.range(feature_map_shape[0]),
+            crop_size = crop_size,
+            method='bilinear',
+            extrapolation_value=0,
+            name=None)
+        patches.append(patch)
+        centers.append(center)
     predictions = {
         'classes': tf.argmax(logits, axis=1),
         'probabilities': tf.nn.softmax(logits, name='softmax_tensor'),
@@ -180,7 +233,11 @@ def ssd_model_fn(features, labels, mode, params):
         'location': location,
         'points': points,
         'points2': points2,
-        'image': image
+        'image': image,
+        'patchl':patches[0],
+        'patchr':patches[1],
+        'center1':centers[0],
+        'center2':centers[1],
     }
     # tf.summary.image('att_map', att_map)
 
@@ -258,6 +315,10 @@ def main(_):
         location = i['location']
         points9 = i['points']
         points = i['points2']
+        patchl = i['patchl']
+        patchr = i['patchr']        
+        center1 = i['center1']
+        center2 = i['center2']
         # print(location)
         # print(points)
         # print(loc, location, points)
@@ -269,35 +330,41 @@ def main(_):
         deye1.append(d_eye(loc.reshape([4]), points))
         deye2.append(d_eye(location[:,-1].reshape([4]), points))
 
-        # # img = cv2.imread(os.path.join('/data0/hz/BioID_croped/Picture_extracted', filename))
+        # img = cv2.imread(os.path.join('/data0/hz/BioID_croped/Picture_extracted', filename))
         # img = cv2.imread(os.path.join('/data0/hz/muct_croped/jpg', filename))
-        # # if FLAGS.data_format=='channels_first':
-        # #     img = np.transpose(img, (1,2,0))
-        # # print(img.shape)
-        # w, h = img.shape[1], img.shape[0]
+        
 
-        # pl = points.reshape([2,2])
-        # pl = pl*[w,h]
-        # pl = pl.astype(np.int64)
-        # for center in pl:
-        #     center = tuple(center)
-        #     cv2.circle(img, center, radius=0, color=(0, 0, 255), thickness=1)
-        # pl = loc.reshape([2,2])
-        # pl = pl*[w,h]
-        # pl = pl.astype(np.int64)
-        # for center in pl:
-        #     center = tuple(center)
-        #     cv2.circle(img, center, radius=0, color=(0, 255, 0), thickness=1)
-        # pl = location.reshape([2,2,9])
-        # pl = np.transpose(pl, (0,2,1))
-        # pl = pl.reshape([18,2])
-        # pl = pl*[w,h]
-        # pl = pl.astype(np.int64)
-        # for center in pl:
-        #     center = tuple(center)
-        #     cv2.circle(img, center, radius=0, color=(255, 0, 0), thickness=1)
+        print(img.shape)
+        w, h = img.shape[1], img.shape[0]
 
-        # cv2.imwrite(os.path.join(summary_dir, filename), img)
+        pl = location.reshape([2,2,9])
+        pl = np.transpose(pl, (0,2,1))
+        pl = pl.reshape([18,2])
+        pl = pl*[w,h]
+        pl = pl.astype(np.int64)
+        for center in pl:
+            center = tuple(center)
+            cv2.circle(img, center, radius=1, color=(255, 0, 0), thickness=1)
+
+        pl = points.reshape([2,2])
+        pl = pl*[w,h]
+        pl = pl.astype(np.int64)
+        for center in pl:
+            center = tuple(center)
+            cv2.circle(img, center, radius=1, color=(0, 0, 255), thickness=1)
+
+        pl = loc.reshape([2,2])
+        pl = pl*[w,h]
+        pl = pl.astype(np.int64)
+        for center in pl:
+            center = tuple(center)
+            cv2.circle(img, center, radius=1, color=(0, 255, 0), thickness=1)
+        center1=center1*[w,h]
+        center2=center2*[w,h]
+        cv2.imwrite(os.path.join(summary_dir, filename+'.l-{}-{}.jpg'.format(int(center1[0]),int(center1[1]))), patchl)
+        cv2.imwrite(os.path.join(summary_dir, filename+'.r-{}-{}.jpg'.format(int(center2[0]),int(center2[1]))), patchr)
+        cv2.imwrite(os.path.join(summary_dir, filename), img)
+        
             
 
     # print('correct:',correct,len(correct))

@@ -390,7 +390,7 @@ def regression_points(top_feature, lower_feature, point_num, training, data_form
       # feature_map = lower_feature
       feature_map_shape = tf.shape(feature_map)
       feature_map_size = [feature_map_shape[h_w_axes[0]], feature_map_shape[h_w_axes[1]]]
-      crop_size = [tf.to_int32(x/4) for x in feature_map_size]  # Crop the 1/4 of feature map.
+      crop_size = [tf.to_int32(x*2/7) for x in feature_map_size]  # Crop the 2/7 of feature map.
       crop_centers = tf.split(tf.stop_gradient(loc_dence), point_num, axis=1) # point_num*[b*2]
       # crop_centers = tf.split(loc_dence, point_num, axis=1) # point_num*[b*2]
     ## crop and regression
@@ -400,8 +400,8 @@ def regression_points(top_feature, lower_feature, point_num, training, data_form
       feature_map = tf.transpose(feature_map, [0, 2, 3, 1])
     location_list = []
     for center in crop_centers:
-      begin = center - 0.25*0.5
-      end = center + 0.25*0.5
+      begin = center - 2./7. * 0.5
+      end = center + 2./7. * 0.5
       boxes = tf.concat([begin, end], axis=1)
       inputs = tf.image.crop_and_resize(
         feature_map,
@@ -478,10 +478,7 @@ def regression_points(top_feature, lower_feature, point_num, training, data_form
             kernel_size=1, strides=1, data_format='channels_last')
         inputs = batch_norm(inputs, training, 'channels_last')
         inputs = tf.nn.relu(inputs)
-        if data_format == 'channels_first':
-          # we need b*4*c format, so here we trans to b*h*w*c, for h*w will be reduce to 1.
-          inputs = tf.transpose(inputs, [0, 2, 3, 1])
-
+        # we need b*4*c format, so here we trans to b*h*w*c, for h*w will be reduce to 1.
       location_list.append(tf.identity(inputs))
     location_dence = location_list 
     # location_dence = tf.concat(location_list, axis=1) 

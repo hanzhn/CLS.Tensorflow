@@ -136,7 +136,7 @@ tf.app.flags.DEFINE_integer(
     'The max number of steps to use for training.')
 # checkpoint related configuration
 tf.app.flags.DEFINE_string(
-    'checkpoint_path', './models/multitask/18_atten_9p/step1/model.ckpt-25000',
+    'checkpoint_path', None,
     'The path to a checkpoint from which to fine-tune.')
 tf.app.flags.DEFINE_string(
     'checkpoint_model_scope', 'vgg_16',
@@ -397,7 +397,7 @@ def ssd_model_fn(features, labels, mode, params):
             
         if FLAGS.location_feature_stage:
             with tf.variable_scope('DSNT'):
-                inputs_shape_hw = int(FLAGS.train_image_size / 4)
+                inputs_shape_hw = int(FLAGS.train_image_size / 4 *2/7)
                 kernel = np.arange(inputs_shape_hw)
                 kernel = kernel / (inputs_shape_hw-1.) - 0.5
                 X = np.tile(kernel, [inputs_shape_hw, 1])
@@ -411,23 +411,23 @@ def ssd_model_fn(features, labels, mode, params):
                     # inputs: channel_last format
                     inputs = tf.reshape(inputs, [-1, inputs_shape_hw**2, 9])
                     inputs = tf.nn.softmax(inputs, 1)
-                    print(X, inputs)
+                    # print(X, inputs)
                     xs = tf.reduce_sum(X*inputs, 1, keepdims=True) #B*1*C
                     ys = tf.reduce_sum(Y*inputs, 1, keepdims=True) #B*1*C
-                    eyes.append( tf.concat([xs,ys], 1) )                #B*2*C
+                    eyes.append( tf.concat([ys,xs], 1) )                #B*2*C
                 location = tf.concat(eyes, 1)   # B*4*C
 
             weights = tf.expand_dims(is_reg,axis=-1)
-            # print_op2 = tf.print("reg:", loc,location,loc_targets, output_stream=sys.stdout)
             # weights = tf.concat([tf.zeros([int(FLAGS.batch_size/2)]), tf.ones(int(FLAGS.batch_size/2))], axis=0)
+            # print_op2 = tf.print("reg:", loc,location,loc_targets, output_stream=sys.stdout)
             # with tf.control_dependencies([print_op2]):
             with tf.variable_scope('reg_loss'):
-                coarse_label = loc_targets[:,:,-1] # b*[lx, ly, rx, ry]
+                coarse_label = loc_targets[:,:,-1] # b*[ly, lx, ry, rx]
                 loc_loss1 = tf.losses.absolute_difference(
                     labels=coarse_label, predictions=loc, weights=weights) * loss_weights[1]
 
                 loc_stop = tf.stop_gradient(loc)
-                location_final = tf.expand_dims(loc_stop,-1) + 0.25*location
+                location_final = tf.expand_dims(loc_stop,-1) + 2/7*location
                 loc_loss2 = tf.losses.absolute_difference(
                     labels=tf.reshape(loc_targets,[-1,36]), predictions=tf.reshape(location_final,[-1,36]), 
                     weights=weights) * loss_weights[2]
