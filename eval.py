@@ -25,7 +25,7 @@ import numpy as np
 from scipy.misc import imread, imsave, imshow, imresize
 import cv2
 
-from net import cls_reg_net
+from net import cls_reg_net as cls_net
 
 from dataset import dataset_common
 from preprocessing import cls_preprocessing
@@ -45,12 +45,12 @@ tf.app.flags.DEFINE_float(
     'gpu_memory_fraction', 0.1, 'GPU memory fraction to use.')
 # scaffold related configuration
 tf.app.flags.DEFINE_string(
-    'data_dir', './dataset/tfrecords/multi-task/9p/CEW',
+    'data_dir', './dataset/tfrecords/multi-task/9p/MUCT',
     'The directory where the dataset input data is stored.')
 tf.app.flags.DEFINE_integer(
     'num_classes', 2, 'Number of classes to use in the dataset.')
 tf.app.flags.DEFINE_string(
-    'model_dir', './models/multitask/18_atten_9p/step4',
+    'model_dir', './models/multitask/18_atten_9p/cls_reg',
     'The directory where the model will be stored.')
 tf.app.flags.DEFINE_integer(
     'log_every_n_steps', 10,
@@ -67,7 +67,13 @@ tf.app.flags.DEFINE_boolean(
     'attention_block', True,
     'Use attention or not. True/False')
 tf.app.flags.DEFINE_boolean(
-    'location_feature_stage', 0,
+    'regression_block', True,
+    'Use regression_block or not. True/False')
+tf.app.flags.DEFINE_integer(
+    'location_feature_stage', None,
+    'The largest feature map used to location the pupil. [0,1,2,3,4,5]or[-1,-2,-3] or None means not to reg')
+tf.app.flags.DEFINE_integer(
+    'location_feature_stage_2', None,
     'The largest feature map used to location the pupil. [0,1,2,3,4,5]or[-1,-2,-3] or None means not to reg')
 ## other settings
 tf.app.flags.DEFINE_integer(
@@ -147,41 +153,42 @@ def ssd_model_fn(features, labels, mode, params):
 
     filename = tf.identity(filename, name='filename')
     with tf.variable_scope(params['model_scope'], default_name=None, values=[image], reuse=tf.AUTO_REUSE):
-        model = cls_reg_net.CLS_REG_Model(FLAGS.resnet_size, FLAGS.resnet_version,
-                                FLAGS.attention_block, FLAGS.location_feature_stage, FLAGS.data_format)
+        model = cls_net.CLS_REG_Model(FLAGS.resnet_size, FLAGS.resnet_version,
+                                FLAGS.attention_block, FLAGS.regression_block, FLAGS.location_feature_stage, FLAGS.location_feature_stage_2, FLAGS.data_format)
         results = model(image, training=(mode==tf.estimator.ModeKeys.TRAIN))
-        if FLAGS.location_feature_stage is not None:
+        if FLAGS.regression_block:
             logits, loc_ori, location = results
-            loc = tf.reshape(loc_ori, [-1, 4, 1])
+            loc = loc_ori
+            # loc = tf.reshape(loc_ori, [-1, 4, 1])
 
-            with tf.variable_scope('DSNT'):
-                inputs_shape_hw = int(FLAGS.train_image_size / 2 *2/7)
-                kernel = np.arange(inputs_shape_hw)
-                kernel = kernel / (inputs_shape_hw-1.) - 0.5
-                X = np.tile(kernel, [inputs_shape_hw, 1])
-                Y = np.transpose(X, [1,0])
-                # channel_last format
-                X = np.reshape(X, [1, -1, 1])
-                Y = np.reshape(Y, [1, -1, 1])
+            # with tf.variable_scope('DSNT'):
+            #     inputs_shape_hw = int(FLAGS.train_image_size / 4 *2/7)
+            #     kernel = np.arange(inputs_shape_hw)
+            #     kernel = kernel / (inputs_shape_hw-1.) - 0.5
+            #     X = np.tile(kernel, [inputs_shape_hw, 1])
+            #     Y = np.transpose(X, [1,0])
+            #     # channel_last format
+            #     X = np.reshape(X, [1, -1, 1])
+            #     Y = np.reshape(Y, [1, -1, 1])
 
-                eyes = []
-                print(location)
-                for inputs in location:
-                    # inputs: channel_last format
-                    # print_op2 = tf.print("location:", inputs, output_stream=sys.stdout)
-                    # with tf.control_dependencies([print_op2]):
-                    # inputs = tf.Print(inputs, [inputs, tf.shape(inputs)])
-                    print(inputs_shape_hw**2, inputs_shape_hw)
-                    inputs = tf.reshape(inputs, [-1, inputs_shape_hw**2, 9])
-                    inputs = tf.nn.softmax(inputs, 1)
-                    # print(X, inputs)
-                    xs = tf.reduce_sum(X*inputs, 1, keepdims=True) #B*1*C
-                    ys = tf.reduce_sum(Y*inputs, 1, keepdims=True) #B*1*C
-                    eyes.append( tf.concat([ys,xs], 1) )                #B*2*C
-                location = tf.concat(eyes, 1)   # B*4*C
+            #     eyes = []
+            #     print(location)
+            #     for inputs in location:
+            #         # inputs: channel_last format
+            #         # print_op2 = tf.print("location:", inputs, output_stream=sys.stdout)
+            #         # with tf.control_dependencies([print_op2]):
+            #         # inputs = tf.Print(inputs, [inputs, tf.shape(inputs)])
+            #         print(inputs_shape_hw**2, inputs_shape_hw)
+            #         inputs = tf.reshape(inputs, [-1, inputs_shape_hw**2, 9])
+            #         inputs = tf.nn.softmax(inputs, 1)
+            #         # print(X, inputs)
+            #         xs = tf.reduce_sum(X*inputs, 1, keepdims=True) #B*1*C
+            #         ys = tf.reduce_sum(Y*inputs, 1, keepdims=True) #B*1*C
+            #         eyes.append( tf.concat([ys,xs], 1) )                #B*2*C
+            #     location = tf.concat(eyes, 1)   # B*4*C
 
-            location = tf.reshape(location, [-1, 4, 9])
-            location = loc + location*0.25
+            # location = tf.reshape(location, [-1, 4, 9])
+            # location = loc + location*0.25
         else:
             logits = results
 
@@ -202,40 +209,40 @@ def ssd_model_fn(features, labels, mode, params):
     # tensors to print
     if FLAGS.data_format=='channels_first':
         image = tf.transpose(image, (0,2,3,1))
-    image = tf.expand_dims(cls_preprocessing.unwhiten_image(tf.squeeze(image,0), output_rgb=False),0)
+    image = tf.expand_dims(cls_preprocessing.unwhiten_image(tf.squeeze(image,0), output_rgb=True),0)
     feature_map_shape = tf.shape(image)
     feature_map_size = [feature_map_shape[1], feature_map_shape[2]]
     crop_size = [tf.to_int32(x*2/7) for x in feature_map_size]  # Crop the 1/4 of feature map.
     crop_centers = tf.split(loc_ori, 2, axis=1) # point_num*[b*2]
     # crop_centers = tf.split(loc_dence, point_num, axis=1) # point_num*[b*2]
-    patches = []
-    centers = []
-    for center in crop_centers:
-        begin = center - 2/7*0.5
-        end = center + 2/7*0.5
-        boxes = tf.concat([begin, end], axis=1)
-        patch = tf.image.crop_and_resize(
-            image,
-            boxes=boxes,
-            box_ind=tf.range(feature_map_shape[0]),
-            crop_size = crop_size,
-            method='bilinear', extrapolation_value=0)
-        patches.append(patch)
-        centers.append(center)
+    # patches = []
+    # centers = []
+    # for center in crop_centers:
+    #     begin = center - 2/7*0.5
+    #     end = center + 2/7*0.5
+    #     boxes = tf.concat([begin, end], axis=1)
+    #     patch = tf.image.crop_and_resize(
+    #         image,
+    #         boxes=boxes,
+    #         box_ind=tf.range(feature_map_shape[0]),
+    #         crop_size = crop_size,
+    #         method='bilinear', extrapolation_value=0)
+    #     patches.append(patch)
+    #     centers.append(center)
     predictions = {
         'classes': tf.argmax(logits, axis=1),
         'probabilities': tf.nn.softmax(logits, name='softmax_tensor'),
         'label': label,
         'filename': filename,
         'loc': loc,
-        'location': location,
+        # 'location': location,
         'points': points,
         'points2': points2,
         'image': image,
-        'patchl':patches[0],
-        'patchr':patches[1],
-        'center1':centers[0],
-        'center2':centers[1],
+        # 'patchl':patches[0],
+        # 'patchr':patches[1],
+        # 'center1':centers[0],
+        # 'center2':centers[1],
     }
     # tf.summary.image('att_map', att_map)
 
@@ -262,6 +269,19 @@ def d_eye(loc, points):
     dr = distance(loc[2:], points[2:])
     dcc = distance(points[:2], points[2:])
     return max(dl, dr)/dcc
+
+def NME(loc, points):
+    # inputs 4*9
+    sub = loc-points
+    sub = np.transpose(sub,[1,0]) #9*4
+    sub = sub.reshape([18,2])
+    dis_sum = 0
+    for point in sub:
+        
+        dis = point[0]**2 + point[1]**2
+        dis = pow(dis, 1./2.)
+        dis_sum += dis
+    return dis_sum/18.
 
 def main(_):
     # Using the Winograd non-fused algorithms provides a small performance boost.
@@ -299,92 +319,109 @@ def main(_):
     pred_results = ssd_detector.predict(input_fn=input_pipeline(dataset_pattern='val-*', is_training=False, batch_size=FLAGS.batch_size),
                                     hooks=[logging_hook], checkpoint_path=get_checkpoint())#, yield_single_examples=False)
 
+    classes = []
     correct = []
     wrong = []
+    nme = []
     deye1 = []
     deye2 = []
     # print('________',pred_results)
+    # f = open('close_list_cls.txt','w')
     for i in pred_results:
         img = i['image']
         pred = i['classes']
         label = i['label']
         filename = i['filename']
         loc = i['loc']
-        location = i['location']
+        # location = i['location']
         points9 = i['points']
         points = i['points2']
-        patchl = i['patchl']
-        patchr = i['patchr']        
-        center1 = i['center1']
-        center2 = i['center2']
+        # patchl = i['patchl']
+        # patchr = i['patchr']        
+        # center1 = i['center1']
+        # center2 = i['center2']
         # print(location)
         # print(points)
         # print(loc, location, points)
+        classes.append(pred)
+
         if pred == label:
             correct.append(filename)
         else:
             wrong.append(filename)
-
-        deye1.append(d_eye(loc.reshape([4]), points))
-        deye2.append(d_eye(location[:,-1].reshape([4]), points))
-
-        # img = cv2.imread(os.path.join('/data0/hz/BioID_croped/Picture_extracted', filename))
-        # img = cv2.imread(os.path.join('/data0/hz/muct_croped/jpg', filename))
         
+        nme.append(NME(loc.reshape(points9.shape), points9))
 
-        print(img.shape)
-        w, h = img.shape[1], img.shape[0]
-        # img = np.transpose(img,[1,0,2])
-        img = cv2.transpose(img)
+        # deye1.append(d_eye(loc.reshape([4]), points))
+        # deye2.append(d_eye(location[:,-1].reshape([4]), points))
 
-        pl = location.reshape([2,2,9])
-        pl = np.transpose(pl, (0,2,1))
-        pl = pl.reshape([18,2])
-        pl = pl*[h,w]
-        pl = pl.astype(np.int64)
-        for center in pl:
-            center = tuple(center)
-            # print(center)
-            cv2.circle(img, center, radius=1, color=(255, 0, 0), thickness=1)
-        # cv2.imwrite(os.path.join(summary_dir, filename), img)
-        # exit()
-        pl = points.reshape([2,2])
-        pl = pl*[h,w]
-        pl = pl.astype(np.int64)
-        for center in pl:
-            center = tuple(center)
-            cv2.circle(img, center, radius=1, color=(0, 0, 255), thickness=1)
-
-        pl = loc.reshape([2,2])
-        pl = pl*[h,w]
-        pl = pl.astype(np.int64)
-        for center in pl:
-            center = tuple(center)
-            cv2.circle(img, center, radius=1, color=(0, 255, 0), thickness=1)
-        center1=center1*[h,w]
-        center2=center2*[h,w]
-        cv2.imwrite(os.path.join(summary_dir, filename+'.l-{}-{}.jpg'.format(int(center1[0]),int(center1[1]))), patchl)
-        cv2.imwrite(os.path.join(summary_dir, filename+'.r-{}-{}.jpg'.format(int(center2[0]),int(center2[1]))), patchr)
-        img = np.transpose(img,[1,0,2])
-        cv2.imwrite(os.path.join(summary_dir, filename), img)
-        # exit()
-        
+        if pred == 1:
+            # img = cv2.imread(os.path.join('/data0/hz/BioID_croped/Picture_extracted', filename))
+            # img = cv2.imread(os.path.join('/data0/hz/muct_croped/jpg', filename))
             
+            # print(img.shape)
+            w, h = img.shape[1], img.shape[0]
+            # img = np.transpose(img,[1,0,2])
+            img = cv2.transpose(img)
 
+            pl = loc.reshape([2,2,9])
+            pl = np.transpose(pl, (0,2,1))
+            pl = pl.reshape([18,2])
+            pl = pl*[h,w]
+            pl = pl.astype(np.int64)
+            for center in pl:
+                center = tuple(center)
+                # print(center)
+                cv2.circle(img, center, radius=1, color=(255, 0, 0), thickness=1)
+
+            pl = points9.reshape([2,2,9])
+            pl = np.transpose(pl, (0,2,1))
+            pl = pl.reshape([18,2])
+            pl = pl*[h,w]
+            pl = pl.astype(np.int64)
+            for center in pl:
+                center = tuple(center)
+                # print(center)
+                cv2.circle(img, center, radius=1, color=(255, 0, 0), thickness=1)
+            # # pl = points.reshape([2,2])
+            # # pl = pl*[h,w]
+            # # pl = pl.astype(np.int64)
+            # # for center in pl:
+            # #     center = tuple(center)
+            # #     cv2.circle(img, center, radius=1, color=(0, 0, 255), thickness=1)
+
+            # # pl = loc.reshape([2,2])
+            # # pl = pl*[h,w]
+            # # pl = pl.astype(np.int64)
+            # # for center in pl:
+            # #     center = tuple(center)
+            # #     cv2.circle(img, center, radius=1, color=(0, 255, 0), thickness=1)
+            # center1=center1*[h,w]
+            # center2=center2*[h,w]
+            # # cv2.imwrite(os.path.join(summary_dir, filename+'.l-{}-{}.jpg'.format(int(center1[0]),int(center1[1]))), patchl)
+            # # cv2.imwrite(os.path.join(summary_dir, filename+'.r-{}-{}.jpg'.format(int(center2[0]),int(center2[1]))), patchr)
+            img = np.transpose(img,[1,0,2])
+            cv2.imwrite(os.path.join(summary_dir, filename), img)
+            # f.write(filename+'\n')
+            # exit()
+    # f.close()
+            
+    print('closed num:', sum(classes), 'total_num:', len(classes))
     # print('correct:',correct,len(correct))
-    print('wrong:',wrong,len(wrong))
+    print('wrong:',len(wrong))
+    print('nme', np.mean(nme))
     print('precision:',float(len(correct))/( len(correct)+len(wrong) ) )
-    print('0.25')
-    print(np.argwhere(np.array(deye1)<0.25).shape[0]/len(deye1))
-    print(np.argwhere(np.array(deye2)<0.25).shape[0]/len(deye2))
-    print('0.10')
-    print(np.argwhere(np.array(deye1)<0.1).shape[0]/len(deye1))
-    print(np.argwhere(np.array(deye2)<0.1).shape[0]/len(deye2))
-    print('0.05')
-    print(np.argwhere(np.array(deye1)<0.05).shape[0]/len(deye1))
-    print(np.argwhere(np.array(deye2)<0.05).shape[0]/len(deye2))
-    print('deye1:', np.mean(deye1))
-    print('deye2:', np.mean(deye2))
+    # print('0.25')
+    # print(np.argwhere(np.array(deye1)<0.25).shape[0]/len(deye1))
+    # print(np.argwhere(np.array(deye2)<0.25).shape[0]/len(deye2))
+    # print('0.10')
+    # print(np.argwhere(np.array(deye1)<0.1).shape[0]/len(deye1))
+    # print(np.argwhere(np.array(deye2)<0.1).shape[0]/len(deye2))
+    # print('0.05')
+    # print(np.argwhere(np.array(deye1)<0.05).shape[0]/len(deye1))
+    # print(np.argwhere(np.array(deye2)<0.05).shape[0]/len(deye2))
+    # print('deye1:', np.mean(deye1))
+    # print('deye2:', np.mean(deye2))
     
 
 

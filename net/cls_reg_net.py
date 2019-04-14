@@ -348,6 +348,37 @@ def attention_module(inputs, training, data_format):
 
   return tf.identity(inputs, 'attention')
 
+def regression_first_stage(top_feature, lower_feature, point_num, training, data_format):
+  channel_axes = 1 if data_format == 'channels_first' else 3
+  h_w_axes = [2, 3] if data_format == 'channels_first' else [1, 2]
+
+  with tf.variable_scope('first_loc'):
+    # The 1st step.
+    # The method by learning
+    inputs=tf.identity(top_feature)
+    if lower_feature:
+      exit('Not finished lower_feature 1!')
+      side_inputs = tf.identity(lower_feature)
+      inputs_shape = tf.shape(top_feature)
+      # h_times_w = inputs_shape[h_w_axes[0]] * inputs_shape[h_w_axes[1]]
+      channel_num = inputs_shape[channel_axes]
+      side_inputs=conv2d_fixed_padding(inputs=side_inputs, filters=channel_num, kernel_size=3, strides=1, data_format=data_format)
+
+    inputs=conv2d_fixed_padding(
+          inputs=inputs, filters=128, 
+          kernel_size=3, strides=1, data_format=data_format)
+    inputs = batch_norm(inputs, training, data_format)
+    inputs = tf.nn.relu(inputs)
+    inputs = tf.reduce_mean(inputs, h_w_axes, keepdims=True)
+    inputs = tf.identity(inputs, 'loc_reduce_mean')
+    # Output denotes [lefty, leftx, righty, rightx].
+    # Crop the whole image to 7*7 grid with overlaps,
+    # so these 4 numbers are in range [0, 7).
+    inputs = tf.squeeze(inputs, h_w_axes)
+    inputs = tf.layers.dense(inputs=inputs, units=2*point_num)
+    loc_dence = tf.identity(inputs, 'loc_dense')
+  return loc_dence
+
 def regression_points(top_feature, lower_feature, point_num, training, data_format):
   """Creates one 2-step location regression module.
   Args:
@@ -380,6 +411,7 @@ def regression_points(top_feature, lower_feature, point_num, training, data_form
     inputs = tf.squeeze(inputs, h_w_axes)
     inputs = tf.layers.dense(inputs=inputs, units=2*point_num)
     loc_dence = tf.identity(inputs, 'loc_dense')
+  return loc_dence
 
   with tf.variable_scope('second_loc'):
     # The 2nd step. Slice the lower feature
@@ -399,9 +431,14 @@ def regression_points(top_feature, lower_feature, point_num, training, data_form
       # for tf.image.crop_and_resize.
       feature_map = tf.transpose(feature_map, [0, 2, 3, 1])
     location_list = []
-    for center in crop_centers:
-      begin = center - 2./7. * 0.5
-      end = center + 2./7. * 0.5
+    for i, center in enumerate(crop_centers):
+      if i == 0:
+        begin = center - 2./7. * 0.5
+        end = center + 2./7. * 0.5
+      elif i == 1:
+        #right eye flip in x axis whith means axis 1
+        begin = center - [[2./7. * 0.5, -2./7. * 0.5]]
+        end = center + [[2./7. * 0.5, -2./7. * 0.5]]
       boxes = tf.concat([begin, end], axis=1)
       inputs = tf.image.crop_and_resize(
         feature_map,
@@ -491,7 +528,7 @@ def regression_points(top_feature, lower_feature, point_num, training, data_form
 class Model(object):
   """Base class for building the Resnet Model."""
 
-  def __init__(self, is_attention, location_feature_stage,
+  def __init__(self, is_attention,is_regression, location_feature_stage,location_feature_stage_2,
               resnet_size, bottleneck, num_classes, num_filters,
                kernel_size, conv_stride, first_pool_size, first_pool_stride,
                block_sizes, block_strides,
@@ -526,8 +563,10 @@ class Model(object):
       ValueError: if invalid version is selected.
     """
     self.is_attention = is_attention
-    self.is_regression = True if location_feature_stage is not None else False
+    self.is_regression = is_regression
+    self.is_regression_2 = True if location_feature_stage_2 is not None else False
     self.location_feature_stage = location_feature_stage
+    self.location_feature_stage_2 = location_feature_stage_2
 
     self.resnet_size = resnet_size
 
@@ -701,8 +740,16 @@ class Model(object):
     # regression the loc
     if self.is_attention and self.is_regression:
       with tf.variable_scope('REG'):
-        lower_feature = self.blocks_feature[self.location_feature_stage]
-        loc, location = regression_points(self.attentioned_feature, lower_feature, 2, training, self.data_format)
+        if self.location_feature_stage is not None:
+          lower_feature = self.blocks_feature[self.location_feature_stage]
+        else:
+          lower_feature = None
+        loc = regression_first_stage(self.attentioned_feature, lower_feature, 18, training, self.data_format)
+        location = None
+        if self.is_regression_2:
+          exit('Not finished here!')
+          lower_feature_2 = self.blocks_feature[self.location_feature_stage_2]
+          loc, location = regression_points(self.attentioned_feature, lower_feature_2, 2, training, self.data_format)
       return final_cls_dense, loc, location
     # If don't regress.
     return final_cls_dense
@@ -743,13 +790,15 @@ def _get_block_sizes(resnet_size):
     raise ValueError(err)
 
 def CLS_REG_Model(resnet_size, resnet_version, 
-                  is_attention, location_feature_stage,
+                  is_attention, is_regression, location_feature_stage, location_feature_stage_2,
                   data_format):
   return Model(
           # classification configs
           is_attention=is_attention,
+          is_regression=is_regression,
           # regression configs
           location_feature_stage=location_feature_stage,
+          location_feature_stage_2=location_feature_stage_2,
           # resnet configs
           resnet_size=resnet_size,
           bottleneck=False,
