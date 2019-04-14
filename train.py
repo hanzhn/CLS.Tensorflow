@@ -84,7 +84,7 @@ tf.app.flags.DEFINE_boolean(
     'regression_block', True,
     'Use regression_block or not. True/False')
 tf.app.flags.DEFINE_integer(
-    'location_feature_stage', None,
+    'location_feature_stage', 1,
     'The largest feature map used to location the pupil. [0,1,2,3,4,5]or[-1,-2,-3] or None means not to reg')
 tf.app.flags.DEFINE_integer(
     'location_feature_stage_2', None,

@@ -1,6 +1,6 @@
 SAVE_DIR='./models/multitask/18_atten_9p'
 
-SAVE_DIR_CUR=${SAVE_DIR}/cls_reg
+SAVE_DIR_CUR=${SAVE_DIR}/cls_reg_lower
 mkdir $SAVE_DIR_CUR
 CUDA_VISIBLE_DEVICES='0,1' python train.py --loss_weights '1, 0.1' \
 --decay_boundaries '15000, 20000' --lr_decay_factors '1, 0.1, 0.01' --max_number_of_steps 25000 \

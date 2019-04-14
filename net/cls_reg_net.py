@@ -348,32 +348,47 @@ def attention_module(inputs, training, data_format):
 
   return tf.identity(inputs, 'attention')
 
+
 def regression_first_stage(top_feature, lower_feature, point_num, training, data_format):
-  channel_axes = 1 if data_format == 'channels_first' else 3
+  '''reg 1'''
   h_w_axes = [2, 3] if data_format == 'channels_first' else [1, 2]
 
   with tf.variable_scope('first_loc'):
     # The 1st step.
     # The method by learning
     inputs=tf.identity(top_feature)
-    if lower_feature:
-      exit('Not finished lower_feature 1!')
+    inputs=conv2d_fixed_padding(
+          inputs=inputs, filters=128, 
+          kernel_size=3, strides=1, data_format=data_format)
+    inputs = batch_norm(inputs, training, data_format)
+    inputs = tf.nn.relu(inputs)
+    if lower_feature is not None:
       side_inputs = tf.identity(lower_feature)
       inputs_shape = tf.shape(top_feature)
       # h_times_w = inputs_shape[h_w_axes[0]] * inputs_shape[h_w_axes[1]]
-      channel_num = inputs_shape[channel_axes]
-      side_inputs=conv2d_fixed_padding(inputs=side_inputs, filters=channel_num, kernel_size=3, strides=1, data_format=data_format)
+      side_inputs=conv2d_fixed_padding(inputs=side_inputs, filters=128, kernel_size=3, strides=1, data_format=data_format)
+      side_inputs = batch_norm(side_inputs, training, data_format)
+      side_inputs = tf.nn.relu(side_inputs)
+
+      if data_format == 'channels_first':
+        # Convert the feature_map from channels_first (NCHW) back to channels_last (NHWC) 
+        # for tf.image
+        inputs = tf.transpose(inputs, [0, 2, 3, 1])
+      shape = [tf.shape(side_inputs)[h_w_axes[0]], tf.shape(side_inputs)[h_w_axes[1]]]
+      inputs = tf.image.resize_images(inputs, shape, method=tf.image.ResizeMethod.BILINEAR)
+      if data_format == 'channels_first':
+        # Convert the feature_map back 
+        inputs = tf.transpose(inputs, [0, 3, 1, 2])
+      inputs = inputs + side_inputs
 
     inputs=conv2d_fixed_padding(
           inputs=inputs, filters=128, 
           kernel_size=3, strides=1, data_format=data_format)
     inputs = batch_norm(inputs, training, data_format)
     inputs = tf.nn.relu(inputs)
+    
     inputs = tf.reduce_mean(inputs, h_w_axes, keepdims=True)
     inputs = tf.identity(inputs, 'loc_reduce_mean')
-    # Output denotes [lefty, leftx, righty, rightx].
-    # Crop the whole image to 7*7 grid with overlaps,
-    # so these 4 numbers are in range [0, 7).
     inputs = tf.squeeze(inputs, h_w_axes)
     inputs = tf.layers.dense(inputs=inputs, units=2*point_num)
     loc_dence = tf.identity(inputs, 'loc_dense')
