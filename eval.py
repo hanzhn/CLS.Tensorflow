@@ -45,12 +45,12 @@ tf.app.flags.DEFINE_float(
     'gpu_memory_fraction', 0.1, 'GPU memory fraction to use.')
 # scaffold related configuration
 tf.app.flags.DEFINE_string(
-    'data_dir', './dataset/tfrecords/multi-task/9p/CEW',
+    'data_dir', './dataset/tfrecords/multi-task/9p/MUCT',
     'The directory where the dataset input data is stored.')
 tf.app.flags.DEFINE_integer(
     'num_classes', 2, 'Number of classes to use in the dataset.')
 tf.app.flags.DEFINE_string(
-    'model_dir', './models/multitask/18_atten_9p/cls_reg_lower',
+    'model_dir', './models/multitask/18_atten_9p/cls_reg_lower_atten',
     'The directory where the model will be stored.')
 tf.app.flags.DEFINE_integer(
     'log_every_n_steps', 10,

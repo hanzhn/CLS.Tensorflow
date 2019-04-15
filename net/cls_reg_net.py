@@ -720,6 +720,7 @@ class Model(object):
               block_fn=self.block_fn, blocks=num_blocks,
               strides=self.block_strides[i], training=training,
               name=name, data_format=self.data_format)
+          # inputs = attention_module(inputs, training, self.data_format)
           self.blocks_feature.append(tf.identity(inputs, name))
 
       # Only apply the BN and ReLU for model that does pre_activation in each

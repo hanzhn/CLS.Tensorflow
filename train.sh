@@ -1,11 +1,11 @@
 SAVE_DIR='./models/multitask/18_atten_9p'
 
-SAVE_DIR_CUR=${SAVE_DIR}/cls_reg_lower
+SAVE_DIR_CUR=${SAVE_DIR}/cls_reg_lower_atten
 mkdir $SAVE_DIR_CUR
-CUDA_VISIBLE_DEVICES='0,1' python train.py --loss_weights '1, 0.1' \
+CUDA_VISIBLE_DEVICES='0,1' python train.py --loss_weights '1, 1' \
 --decay_boundaries '15000, 20000' --lr_decay_factors '1, 0.1, 0.01' --max_number_of_steps 25000 \
 --model_dir ${SAVE_DIR_CUR} \
---checkpoint_path ${SAVE_DIR}/step1/model.ckpt-25000 --checkpoint_exclude_scopes 'ssd300/REG/'
+# --checkpoint_path ${SAVE_DIR}/step1/model.ckpt-25000 --checkpoint_exclude_scopes 'ssd300/REG/'
 
 # SAVE_DIR_CUR=${SAVE_DIR}/step2
 # mkdir $SAVE_DIR_CUR
