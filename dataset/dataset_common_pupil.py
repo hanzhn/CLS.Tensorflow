@@ -33,6 +33,7 @@ data_splits_num = {
 
 def slim_get_batch(num_classes, batch_size, split_name, file_pattern, num_readers, num_preprocessing_threads, image_preprocessing_fn, num_epochs=None, is_training=True):
     """Gets a dataset tuple with instructions for reading Pascal VOC dataset.
+
     Args:
       num_classes: total class numbers in dataset.
       batch_size: the size of each batch.
@@ -44,6 +45,7 @@ def slim_get_batch(num_classes, batch_size, split_name, file_pattern, num_reader
       anchor_encoder: the function used to encoder all anchors.
       num_epochs: total epoches for iterate this dataset.
       is_training: whether we are in traing phase.
+
     Returns:
       A batch of [image, shape, loc_targets, cls_targets, match_scores].
     """
@@ -56,32 +58,17 @@ def slim_get_batch(num_classes, batch_size, split_name, file_pattern, num_reader
         'image/format':         tf.FixedLenFeature((), tf.string, default_value='jpeg'),
         'image/filename':       tf.FixedLenFeature((), tf.string, default_value=''),
         'image/shape':          tf.FixedLenFeature([3], tf.int64),
-        'label/cls/label':      tf.FixedLenFeature([1], tf.int64),
-        'label/cls/label_text': tf.FixedLenFeature((), tf.string, default_value=''),
-        'label/loc/leftx':      tf.FixedLenFeature([1], tf.float32),
-        'label/loc/lefty':      tf.FixedLenFeature([1], tf.float32),
-        'label/loc/rightx':     tf.FixedLenFeature([1], tf.float32),
-        'label/loc/righty':     tf.FixedLenFeature([1], tf.float32),
         'label/task_type':      tf.FixedLenFeature((), tf.int64),
-        'label/loc/left_roundx':      tf.FixedLenFeature([9], tf.float32),
-        'label/loc/left_roundy':      tf.FixedLenFeature([9], tf.float32),
-        'label/loc/right_roundx':     tf.FixedLenFeature([9], tf.float32),
-        'label/loc/right_roundy':     tf.FixedLenFeature([9], tf.float32),
+        'label/loc/roundx':     tf.FixedLenFeature([33], tf.float32),
+        'label/loc/roundy':     tf.FixedLenFeature([33], tf.float32),
     }
     items_to_handlers = {
         'image': slim.tfexample_decoder.Image('image/encoded', 'image/format'),
         'filename': slim.tfexample_decoder.Tensor('image/filename'),
         'shape': slim.tfexample_decoder.Tensor('image/shape'),
-        'label': slim.tfexample_decoder.Tensor('label/cls/label'),
-        # 'leftx': slim.tfexample_decoder.Tensor('label/loc/leftx'),
-        # 'lefty': slim.tfexample_decoder.Tensor('label/loc/lefty'),
-        # 'rightx': slim.tfexample_decoder.Tensor('label/loc/rightx'),
-        # 'righty': slim.tfexample_decoder.Tensor('label/loc/righty'),
         'task_type': slim.tfexample_decoder.Tensor('label/task_type'),
-        'left_roundx': slim.tfexample_decoder.Tensor('label/loc/left_roundx'),
-        'left_roundy': slim.tfexample_decoder.Tensor('label/loc/left_roundy'),
-        'right_roundx': slim.tfexample_decoder.Tensor('label/loc/right_roundx'),
-        'right_roundy': slim.tfexample_decoder.Tensor('label/loc/right_roundy'),
+        'roundx': slim.tfexample_decoder.Tensor('label/loc/roundx'),
+        'roundy': slim.tfexample_decoder.Tensor('label/loc/roundy'),
     }
     decoder = slim.tfexample_decoder.TFExampleDecoder(keys_to_features, items_to_handlers)
 
@@ -107,11 +94,11 @@ def slim_get_batch(num_classes, batch_size, split_name, file_pattern, num_reader
             shuffle=is_training,
             num_epochs=num_epochs)
 
-    org_image, filename, glabels_raw, leftx, lefty, rightx, righty, task_type = provider.get(
-        ['image', 'filename', 'label', 'left_roundx','left_roundy','right_roundx','right_roundy', 'task_type'])
-    image, [[leftx, lefty], [rightx, righty]]= image_preprocessing_fn(org_image, [[leftx, lefty], [rightx, righty]])
+    org_image, filename, x, y, task_type = provider.get(
+        ['image', 'filename','roundx','roundy', 'task_type'])
+    image, [x,y]= image_preprocessing_fn(org_image, [x, y])
     # return image
-    tensors_to_batch = [image, filename, glabels_raw, [lefty, leftx, righty, rightx], task_type]
+    tensors_to_batch = [image, filename, [x,y], task_type]
     return tf.train.batch(tensors_to_batch,
                     dynamic_pad=(not is_training),
                     batch_size=batch_size,

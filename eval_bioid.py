@@ -21,6 +21,7 @@ import sys
 
 import tensorflow as tf
 slim = tf.contrib.slim
+import logging
 
 import numpy as np
 from scipy.misc import imread, imsave, imshow, imresize
@@ -28,7 +29,7 @@ import cv2
 
 from net import cls_reg_net_step2 as cls_reg_net
 
-from dataset import dataset_common_pupil as dataset_commom
+from dataset import dataset_common
 from preprocessing import cls_preprocessing
 from utility import scaffolds
 
@@ -46,7 +47,7 @@ tf.app.flags.DEFINE_float(
     'gpu_memory_fraction', 0.1, 'GPU memory fraction to use.')
 # scaffold related configuration
 tf.app.flags.DEFINE_string(
-    'data_dir', './dataset/tfrecords/pupil',
+    'data_dir', './dataset/tfrecords/multi-task/9p/BIOID',
     'The directory where the dataset input data is stored.')
 tf.app.flags.DEFINE_integer(
     'num_classes', 2, 'Number of classes to use in the dataset.')
@@ -75,7 +76,7 @@ tf.app.flags.DEFINE_integer(
     'batch_size', 1,
     'Batch size for training and evaluation.')
 tf.app.flags.DEFINE_integer(
-    'train_image_size', 64,
+    'train_image_size', 224,
     'The size of the input image for the model to use.')
 tf.app.flags.DEFINE_string(
     'data_format', 'channels_first', # 'channels_first' or 'channels_last'
@@ -95,8 +96,11 @@ tf.app.flags.DEFINE_string(
 #     'keep_topk', 400, 'Number of total object to keep for each image before nms.')
 # checkpoint related configuration
 tf.app.flags.DEFINE_string(
-    'checkpoint_path', './models/multitask/9p/18_atten',
+    'checkpoint_path', './models/multitask/18_atten_9p/step3/model.ckpt-25000',
     'The path to a checkpoint from which to fine-tune.')
+tf.app.flags.DEFINE_string(
+    'checkpoint_exclude_scopes', 'ssd300/REG/second_loc',
+    'Comma-separated list of scopes of variables to exclude when restoring from a checkpoint. ssd300/REG/second_loc')
 tf.app.flags.DEFINE_string(
     'model_scope', 'ssd300',
     'Model scope name used to replace the name_scope in checkpoint.')
@@ -124,7 +128,7 @@ def input_pipeline(dataset_pattern='val-*', is_training=False, batch_size=FLAGS.
         image_preprocessing_fn = lambda image_, label_: cls_preprocessing.preprocess_image(image_, label_, target_shape, 
                                                                     is_training=is_training, data_format=FLAGS.data_format, 
                                                                     output_rgb=False)
-        image, filename, points, is_reg = dataset_common.slim_get_batch(
+        image, filename, label, points, is_reg = dataset_common.slim_get_batch(
                                                             FLAGS.num_classes,
                                                             batch_size,
                                                             ('train' if is_training else 'val'),
@@ -134,13 +138,13 @@ def input_pipeline(dataset_pattern='val-*', is_training=False, batch_size=FLAGS.
                                                             image_preprocessing_fn,
                                                             num_epochs=1,
                                                             is_training=is_training)
-        return {'image': image, 'filename': filename, 'points':points, 'is_reg': is_reg}, None
+        return {'image': image, 'filename': filename, 'label': label, 'points':points, 'is_reg': is_reg}, None
     return input_fn
 
 def ssd_model_fn(features, labels, mode, params):
     """model_fn for MODLE to be used with our Estimator."""
     filename = features['filename']
-    # label = features['label']
+    label = features['label']
     image = features['image']
     points = features['points']
     is_reg = features['is_reg']
@@ -152,8 +156,14 @@ def ssd_model_fn(features, labels, mode, params):
                                 FLAGS.attention_block, FLAGS.location_feature_stage, FLAGS.data_format)
         results = model(image, training=(mode==tf.estimator.ModeKeys.TRAIN))
         if FLAGS.location_feature_stage is not None:
-            logits, loc_ori, location, location_c = results
+            logits, loc_ori, location, location_c= results
             loc = tf.reshape(loc_ori, [-1, 4, 1])
+            # location: 2*2*33
+            # flip x and y
+            split0, split1 = tf.split(location, [1,1], axis=1)
+            location = tf.concat([split1,split0], axis=1)
+            location = tf.reshape(location, [-1, 4, 33])
+            location = loc + location*2/7
         else:
             logits = results
 
@@ -175,20 +185,44 @@ def ssd_model_fn(features, labels, mode, params):
     if FLAGS.data_format=='channels_first':
         image = tf.transpose(image, (0,2,3,1))
     image = tf.expand_dims(cls_preprocessing.unwhiten_image(tf.squeeze(image,0), output_rgb=False),0)
-
+    feature_map_shape = tf.shape(image)
+    feature_map_size = [feature_map_shape[1], feature_map_shape[2]]
+    crop_size = [tf.to_int32(x*2/7) for x in feature_map_size]  # Crop the 1/4 of feature map.
+    crop_centers = tf.split(loc_ori, 2, axis=1) # point_num*[b*2]
+    # crop_centers = tf.split(loc_dence, point_num, axis=1) # point_num*[b*2]
+    patches = []
+    centers = []
+    for center in crop_centers:
+        begin = center - 2/7*0.5
+        end = center + 2/7*0.5
+        boxes = tf.concat([begin, end], axis=1)
+        patch = tf.image.crop_and_resize(
+            image,
+            boxes=boxes,
+            box_ind=tf.range(feature_map_shape[0]),
+            crop_size = crop_size,
+            method='bilinear', extrapolation_value=0)
+        patches.append(patch)
+        centers.append(center)
     predictions = {
         'classes': tf.argmax(logits, axis=1),
         'probabilities': tf.nn.softmax(logits, name='softmax_tensor'),
-        # 'label': label,
+        'label': label,
         'filename': filename,
         'loc': loc,
         'location': location,
         'points': points,
+        'points2': points2,
         'image': image,
+        'patchl':patches[0],
+        'patchr':patches[1],
+        'center1':centers[0],
+        'center2':centers[1],
     }
     # tf.summary.image('att_map', att_map)
 
     if mode == tf.estimator.ModeKeys.PREDICT:
+        init_variables_from_checkpoint(FLAGS.checkpoint_exclude_scopes)
         # Return the predictions and the specification for serving a SavedModel
         return tf.estimator.EstimatorSpec(
             mode=mode,
@@ -199,6 +233,82 @@ def ssd_model_fn(features, labels, mode, params):
     else:
         raise ValueError('This script only support "PREDICT" mode!')
 
+def init_variables_from_checkpoint(checkpoint_exclude_scopes=None):
+    """Variable initialization form a given checkpoint path.
+    
+    Modified from:
+        https://github.com/tensorflow/models/blob/master/research/
+        object_detection/model_lib.py
+    
+    Note that the init_fn is only run when initializing the model during the 
+    very first global step.
+    
+    Args:
+        checkpoint_exclude_scopes: Comma-separated list of scopes of variables
+            to exclude when restoring from a checkpoint.
+    """
+    exclude_patterns = None
+    if checkpoint_exclude_scopes:
+        exclude_patterns = [scope.strip() for scope in 
+                            checkpoint_exclude_scopes.split(',')]
+    variables_to_restore = tf.global_variables()
+    variables_to_restore.append(slim.get_or_create_global_step())
+    variables_to_init = tf.contrib.framework.filter_variables(
+        variables_to_restore, exclude_patterns=exclude_patterns)
+    variables_to_init_dict = {var.op.name: var for var in variables_to_init}
+    
+    available_var_map = get_variables_available_in_checkpoint(
+        variables_to_init_dict, FLAGS.checkpoint_path, 
+        include_global_step=False)
+    tf.train.init_from_checkpoint(FLAGS.checkpoint_path, available_var_map)
+    
+    
+def get_variables_available_in_checkpoint(variables,
+                                          checkpoint_path,
+                                          include_global_step=True):
+    """Returns the subset of variables in the checkpoint.
+    
+    Inspects given checkpoint and returns the subset of variables that are
+    available in it.
+    
+    Args:
+        variables: A dictionary of variables to find in checkpoint.
+        checkpoint_path: Path to the checkpoint to restore variables from.
+        include_global_step: Whether to include `global_step` variable, if it
+            exists. Default True.
+            
+    Returns:
+        A dictionary of variables.
+        
+    Raises:
+        ValueError: If `variables` is not a dict.
+    """
+    if not isinstance(variables, dict):
+        raise ValueError('`variables` is expected to be a dict.')
+    
+    # Available variables
+    ckpt_reader = tf.train.NewCheckpointReader(checkpoint_path)
+    ckpt_vars_to_shape_map = ckpt_reader.get_variable_to_shape_map()
+    if not include_global_step:
+        ckpt_vars_to_shape_map.pop(tf.GraphKeys.GLOBAL_STEP, None)
+    vars_in_ckpt = {}
+    for variable_name, variable in sorted(variables.items()):
+        if variable_name in ckpt_vars_to_shape_map:
+            if ckpt_vars_to_shape_map[variable_name] == variable.shape.as_list():
+                vars_in_ckpt[variable_name] = variable
+            else:
+                logging.warning('Variable [%s] is avaible in checkpoint, but '
+                                'has an incompatible shape with model '
+                                'variable. Checkpoint shape: [%s], model '
+                                'variable shape: [%s]. This variable will not '
+                                'be initialized from the checkpoint.',
+                                variable_name, 
+                                ckpt_vars_to_shape_map[variable_name],
+                                variable.shape.as_list())
+        else:
+            logging.warning('Variable [%s] is not available in checkpoint',
+                            variable_name)
+    return vars_in_ckpt
 def parse_comma_list(args):
     return [float(s.strip()) for s in args.split(',')]
 
@@ -261,37 +371,61 @@ def main(_):
     correct = []
     wrong = []
     nme = []
-    nme2 = []
     deye1 = []
     deye2 = []
     # print('________',pred_results)
     for i in pred_results:
         img = i['image']
+        pred = i['classes']
+        label = i['label']
         filename = i['filename']
-        points = i['points']
-        location = i['location'] # 2*33
+        loc = i['loc'] # 4
+        loc = loc.reshape([2,2])
+        print(loc)
+        exit()
+
+        location = i['location'] # 4*9
         location_2 = location[:,-1]
-        location_2 = location_2.reshape([1,2])
-        points_2 = points[:,-1]
-        points_2 = points_2.reshape([1,2])
+        location_2 = location_2.reshape([2,2])
 
-        location = location.reshape([2,33])
-        location = np.transpose(location, [1,0])
+        location = location.reshape([2,2,33])
+        location = np.transpose(location, (0,2,1))
+        location = location.reshape([66,2])
 
-        nme.append(NME(location, points))
-        nme2.append(NME(location_2, points_2))
-        # deye1.append(d_eye(location_2, points))
+        points9 = i['points'] # 4*9
+        points9 = points9.reshape([2,2,9])
+        points9 = np.transpose(points9, (0,2,1))
+        points9 = points9.reshape([18,2])
+
+        points = i['points2'] # 4
+        points = points.reshape([2,2])
+
+        patchl = i['patchl']
+        patchr = i['patchr']
+        center1 = i['center1'] #[xy]
+        center2 = i['center2'] #[xy]
+        # print(location)
+        # print(points)
+        # print(loc, location, points)
+        if pred == label:
+            correct.append(filename)
+        else:
+            wrong.append(filename)
+
+        nme.append(NME(loc, points))
+        deye1.append(d_eye(loc, points))
+        deye2.append(d_eye(location_2, points))
 
         # print(img.shape)
-        w, h = img.shape[1], img.shape[0]
-        # img = np.transpose(img,[1,0,2])
+        # w, h = img.shape[1], img.shape[0]
+        # # img = np.transpose(img,[1,0,2])
         # img = cv2.transpose(img)
 
-        pl = location*[h,w]
-        pl = pl.astype(np.int64)
-        for center in pl:
-            center = tuple(center)
-            cv2.circle(img, center, radius=1, color=(255, 0, 0), thickness=1)
+        # pl = points9*[h,w]
+        # pl = pl.astype(np.int64)
+        # for center in pl:
+        #     center = tuple(center)
+        #     cv2.circle(img, center, radius=1, color=(255, 0, 0), thickness=1)
 
         # pl = location_2*[h,w]
         # pl = pl.astype(np.int64)
@@ -309,7 +443,7 @@ def main(_):
         # cv2.imwrite(os.path.join(summary_dir, filename+'.l-{}-{}.jpg'.format(int(center1[0]),int(center1[1]))), patchl)
         # cv2.imwrite(os.path.join(summary_dir, filename+'.r-{}-{}.jpg'.format(int(center2[0]),int(center2[1]))), patchr)
         # img = np.transpose(img,[1,0,2])
-        cv2.imwrite(os.path.join(summary_dir, filename), img)
+        # cv2.imwrite(os.path.join(summary_dir, filename), img)
         # # exit()
         
             
@@ -317,19 +451,18 @@ def main(_):
     # print('correct:',correct,len(correct))
     print('wrong:',len(wrong))
     print('nme', np.mean(nme))
-    print('nme2', np.mean(nme2))
-    # print('precision:',float(len(correct))/( len(correct)+len(wrong) ) )
-    # print('0.25')
-    # print(np.argwhere(np.array(deye1)<0.25).shape[0]/len(deye1))
-    # print(np.argwhere(np.array(deye2)<0.25).shape[0]/len(deye2))
-    # print('0.10')
-    # print(np.argwhere(np.array(deye1)<0.1).shape[0]/len(deye1))
-    # print(np.argwhere(np.array(deye2)<0.1).shape[0]/len(deye2))
-    # print('0.05')
-    # print(np.argwhere(np.array(deye1)<0.05).shape[0]/len(deye1))
-    # print(np.argwhere(np.array(deye2)<0.05).shape[0]/len(deye2))
-    # print('deye1:', np.mean(deye1))
-    # print('deye2:', np.mean(deye2))
+    print('precision:',float(len(correct))/( len(correct)+len(wrong) ) )
+    print('0.25')
+    print(np.argwhere(np.array(deye1)<0.25).shape[0]/len(deye1))
+    print(np.argwhere(np.array(deye2)<0.25).shape[0]/len(deye2))
+    print('0.10')
+    print(np.argwhere(np.array(deye1)<0.1).shape[0]/len(deye1))
+    print(np.argwhere(np.array(deye2)<0.1).shape[0]/len(deye2))
+    print('0.05')
+    print(np.argwhere(np.array(deye1)<0.05).shape[0]/len(deye1))
+    print(np.argwhere(np.array(deye2)<0.05).shape[0]/len(deye2))
+    print('deye1:', np.mean(deye1))
+    print('deye2:', np.mean(deye2))
     
 
 

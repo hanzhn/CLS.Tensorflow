@@ -209,6 +209,25 @@ def random_flip_left_right(image, location):
     location = tf.cond(mirror_cond, lambda: mirror_location, lambda: location)
     return result, location
 
+def random_crop_image(image, location):
+  with tf.name_scope('random_crop_image'):
+    max_margin = 1./20.
+    uniform_random_both = tf.random_uniform([], 0, 2*max_margin)
+    uniform_random1 = tf.random_uniform([], 0, 1)
+    uniform_random2 = tf.random_uniform([], 0, 1)
+
+    height, width, _ = _ImageDimensions(image, rank=3)
+    float_height, float_width = tf.to_float(height), tf.to_float(width)
+
+    margins = [height, width]*uniform_random_both
+    top_margin, bottom_margin = margins[0]*uniform_random1, margins[0]*(1-uniform_random1)
+    left_margin, right_margin = margins[1]*uniform_random2, margins[1]*(1-uniform_random2)
+    # top_margin, bottom_margin, left_margin, right_margin = top_margin, bottom_margin, left_margin, right_margin
+    crop_image = tf.image.crop_to_bounding_box(image, top_margin, left_margin, 
+                                              height - top_margin - bottom_margin,
+                                              width - left_margin - right_margin)
+    location = [location[0]-left_margin]
+
 def preprocess_for_train(image, location, out_shape, data_format='channels_first', scope='ssd_preprocessing_train', output_rgb=True):
   """Preprocesses the given image for training.
 
@@ -228,20 +247,20 @@ def preprocess_for_train(image, location, out_shape, data_format='channels_first
     orig_dtype = image.dtype
     if orig_dtype != tf.float32:
       image = tf.image.convert_image_dtype(image, dtype=tf.float32)
-
+    # image = random_crop_image(image, location)
     # Randomly distort the colors. There are 4 ways to do it.
     distort_image = apply_with_random_selector(image,
                                           lambda x, ordering: distort_color(x, ordering, True),
                                           num_cases=4)
 
-    # Randomly flip the image horizontally.
-    random_sample_flip_image, location = random_flip_left_right(distort_image, location)
+    # # Randomly flip the image horizontally.
+    # random_sample_flip_image, location = random_flip_left_right(distort_image, location)
     # Rescale to VGG input scale.
-    height, width, _ = _ImageDimensions(random_sample_flip_image, rank=3)
+    height, width, _ = _ImageDimensions(distort_image, rank=3)
     float_height, float_width = tf.to_float(height), tf.to_float(width)
     target_height, target_width = tf.to_float(out_shape[0]), tf.to_float(out_shape[1])
 
-    random_sample_flip_resized_image = tf.image.resize_images(random_sample_flip_image, out_shape, method=tf.image.ResizeMethod.BILINEAR, align_corners=False)
+    random_sample_flip_resized_image = tf.image.resize_images(distort_image, out_shape, method=tf.image.ResizeMethod.BILINEAR, align_corners=False)
     random_sample_flip_resized_image.set_shape([None, None, 3])
 
     final_image = tf.to_float(tf.image.convert_image_dtype(random_sample_flip_resized_image, orig_dtype, saturate=True))

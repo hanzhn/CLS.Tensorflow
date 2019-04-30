@@ -24,9 +24,9 @@ import tensorflow as tf
 slim = tf.contrib.slim
 import logging
 
-from net import cls_reg_net as cls_net
+from net import cls_reg_net_step2 as cls_net
 
-from dataset import dataset_common
+from dataset import dataset_common_pupil as dataset_common
 from preprocessing import cls_preprocessing
 from utility import scaffolds
 
@@ -44,18 +44,12 @@ tf.app.flags.DEFINE_float(
     'gpu_memory_fraction', 1., 'GPU memory fraction to use.')
 # scaffold related configuration
 tf.app.flags.DEFINE_string(
-    'data_dir', './dataset/tfrecords',
-    'The directory where the dataset input data is stored.')
-tf.app.flags.DEFINE_string(
-    'cls_data_dir', 'multi-task/9p/CEW',
-    'The directory where the dataset input data is stored.')
-tf.app.flags.DEFINE_string(
-    'reg_data_dir', 'multi-task/9p/MUCT',
+    'data_dir', './dataset/tfrecords/pupil',
     'The directory where the dataset input data is stored.')
 tf.app.flags.DEFINE_integer(
     'num_classes', 2, 'Number of classes to use in the dataset.')
 tf.app.flags.DEFINE_string(
-    'model_dir', './models/multitask/18_atten_9p',
+    'model_dir', './models/pupil',
     'The directory where the model will be stored.')
 tf.app.flags.DEFINE_integer(
     'log_every_n_steps', 10,
@@ -85,13 +79,13 @@ tf.app.flags.DEFINE_boolean(
     'The largest feature map used to location the pupil. [0,1,2,3,4,5]or[-1,-2,-3] or None means not to reg')
 ## other settings
 tf.app.flags.DEFINE_integer(
-    'train_image_size', 224,
+    'train_image_size', 64,
     'The size of the input image for the model to use.')
 tf.app.flags.DEFINE_integer(
     'train_epochs', None,
     'The number of epochs to use for training.')
 tf.app.flags.DEFINE_integer(
-    'batch_size', 16*2,
+    'batch_size', 32*2,
     'Batch size for training and evaluation.')
 tf.app.flags.DEFINE_string(
     'data_format', 'channels_first', # 'channels_first' or 'channels_last'
@@ -276,47 +270,19 @@ def input_pipeline(dataset_pattern='train-*', is_training=True, batch_size=FLAGS
         image_preprocessing_fn = lambda image_, label_: cls_preprocessing.preprocess_image(image_, label_, target_shape, 
                                                                     is_training=is_training, data_format=FLAGS.data_format, 
                                                                     output_rgb=False)
-        if FLAGS.location_feature_stage is not None:
-            _batch_size = int(batch_size/2)
-            print('Use cls and reg, so the batch size of each task is {}'.format(_batch_size))
-            image1, _, cls_targets1, points1, is_reg1 = dataset_common.slim_get_batch(
-                                                            FLAGS.num_classes,
-                                                            _batch_size,
-                                                            ('train' if is_training else 'val'),
-                                                            os.path.join(FLAGS.data_dir, FLAGS.cls_data_dir, dataset_pattern),
-                                                            int(FLAGS.num_readers/2),
-                                                            int(FLAGS.num_preprocessing_threads/2),
-                                                            image_preprocessing_fn,
-                                                            num_epochs=FLAGS.train_epochs,
-                                                            is_training=is_training)
-            image2, _, cls_targets2, points2, is_reg2 = dataset_common.slim_get_batch(
-                                                            FLAGS.num_classes,
-                                                            _batch_size,
-                                                            ('train' if is_training else 'val'),
-                                                            os.path.join(FLAGS.data_dir, FLAGS.reg_data_dir, dataset_pattern),
-                                                            int(FLAGS.num_readers/2),
-                                                            int(FLAGS.num_preprocessing_threads/2),
-                                                            image_preprocessing_fn,
-                                                            num_epochs=FLAGS.train_epochs,
-                                                            is_training=is_training)
-            image, cls_targets, points, is_reg = [tf.concat([image1, image2],axis=0),
-                                                            tf.concat([cls_targets1, cls_targets2],axis=0),
-                                                            tf.concat([points1, points2],axis=0),
-                                                            tf.concat([is_reg1, is_reg2],axis=0),]
-        else:
-            _batch_size = batch_size
-            image, _, cls_targets, points, is_reg = dataset_common.slim_get_batch(
-                                                            FLAGS.num_classes,
-                                                            _batch_size,
-                                                            ('train' if is_training else 'val'),
-                                                            os.path.join(FLAGS.data_dir, dataset_pattern),
-                                                            FLAGS.num_readers,
-                                                            FLAGS.num_preprocessing_threads,
-                                                            image_preprocessing_fn,
-                                                            num_epochs=FLAGS.train_epochs,
-                                                            is_training=is_training)
+        _batch_size = batch_size
+        image, _, points, is_reg = dataset_common.slim_get_batch(
+                                                        FLAGS.num_classes,
+                                                        _batch_size,
+                                                        ('train' if is_training else 'val'),
+                                                        os.path.join(FLAGS.data_dir, dataset_pattern),
+                                                        FLAGS.num_readers,
+                                                        FLAGS.num_preprocessing_threads,
+                                                        image_preprocessing_fn,
+                                                        num_epochs=FLAGS.train_epochs,
+                                                        is_training=is_training)
 
-        return image, {'cls_targets': cls_targets, 'loc_targets': points, 'is_reg': is_reg}
+        return image, {'loc_targets': points, 'is_reg': is_reg}
         # return image, {'cls_targets': cls_targets, 'loc_targets': tf.squeeze(points,axis=-1), 'is_reg': is_reg}
     return input_fn
 
@@ -343,8 +309,7 @@ def modified_smooth_l1(bbox_pred, bbox_targets, bbox_inside_weights=1., bbox_out
 
 def ssd_model_fn(features, labels, mode, params):
     """model_fn for MODLE to be used with our Estimator."""
-    cls_targets = labels['cls_targets']
-    print(labels['loc_targets'])
+    # cls_targets = labels['cls_targets']
     loc_targets = labels['loc_targets']
     is_reg = labels['is_reg']
 
@@ -352,8 +317,9 @@ def ssd_model_fn(features, labels, mode, params):
         model = cls_net.CLS_REG_Model(FLAGS.resnet_size, FLAGS.resnet_version,
                                 FLAGS.attention_block, FLAGS.location_feature_stage, FLAGS.data_format)
         results = model(features, mode == tf.estimator.ModeKeys.TRAIN)
+        print(results)
         if FLAGS.location_feature_stage is not None:
-            logits, loc, location = results
+            logits, loc, location, location_c = results
         else:
             logits = results
 
@@ -380,68 +346,23 @@ def ssd_model_fn(features, labels, mode, params):
             })
 
     with tf.variable_scope('losses'):
-        loss_weights = parse_comma_list(FLAGS.loss_weights)
-        with tf.variable_scope('cls_loss'):
-            if FLAGS.location_feature_stage is not None:
-                weights = 1 - is_reg
-                cls_targets = tf.expand_dims(weights,axis=-1) * cls_targets
-            else:
-                weights = 1.0
-
-            # print_op1 = tf.print("cls:", logits, cls_targets, output_stream=sys.stdout)
-            # with tf.control_dependencies([print_op1]):
-            # Calculate loss, which includes softmax cross entropy and L2 regularization.
-            cross_entropy = tf.losses.sparse_softmax_cross_entropy(
-                logits=logits, labels=cls_targets, weights=weights) * loss_weights[0]
-        total_loss = cross_entropy 
-            
         if FLAGS.location_feature_stage is not None:
-            with tf.variable_scope('DSNT'):
-                inputs_shape_hw = int(FLAGS.train_image_size / 2 *2/7)
-                kernel = np.arange(inputs_shape_hw)
-                kernel = kernel / (inputs_shape_hw-1.) - 0.5
-                X = np.tile(kernel, [inputs_shape_hw, 1])
-                Y = np.transpose(X, [1,0])
-                # channel_last format
-                X = np.reshape(X, [1, -1, 1])
-                Y = np.reshape(Y, [1, -1, 1])
-
-                eyes = []
-                for inputs in location:
-                    # inputs: channel_last format
-                    inputs = tf.reshape(inputs, [-1, inputs_shape_hw**2, 9])
-                    inputs = tf.nn.softmax(inputs, 1)
-                    # print(X, inputs)
-                    xs = tf.reduce_sum(X*inputs, 1, keepdims=True) #B*1*C
-                    ys = tf.reduce_sum(Y*inputs, 1, keepdims=True) #B*1*C
-                    eyes.append( tf.concat([ys,xs], 1) )                #B*2*C
-                location = tf.concat(eyes, 1)   # B*4*C
-
-            weights = tf.expand_dims(is_reg,axis=-1)
             # weights = tf.concat([tf.zeros([int(FLAGS.batch_size/2)]), tf.ones(int(FLAGS.batch_size/2))], axis=0)
             # print_op2 = tf.print("reg:", loc,location,loc_targets, output_stream=sys.stdout)
             # with tf.control_dependencies([print_op2]):
             with tf.variable_scope('reg_loss'):
-                coarse_label = loc_targets[:,:,-1] # b*[ly, lx, ry, rx]
+                coarse_label = loc_targets # b*[ly, lx, ry, rx]
                 loc_loss1 = tf.losses.absolute_difference(
-                    labels=coarse_label, predictions=loc, weights=weights) * loss_weights[1]
-
-                loc_stop = tf.stop_gradient(loc)
-                location_final = tf.expand_dims(loc_stop,-1) + 2/7*location
+                    labels=loc_targets, predictions=location)
+                print(loc_targets)
                 loc_loss2 = tf.losses.absolute_difference(
-                    labels=tf.reshape(loc_targets,[-1,36]), predictions=tf.reshape(location_final,[-1,36]), 
-                    weights=weights) * loss_weights[2]
-            # print_op3 = tf.print("loss:", total_loss, loc_loss1, loc_loss2, output_stream=sys.stdout)
-            # with tf.control_dependencies([print_op3]):
-
+                    labels=loc_targets[:,:,-1], predictions=location_c)
             # Reset the total_loss.
-            total_loss = (total_loss) + (loc_loss1) + loc_loss2
+            total_loss = loc_loss1 + tf.stop_gradient(loc_loss2)
             # total_loss = tf.stop_gradient(total_loss) + tf.stop_gradient(loc_loss1) + loc_loss2
             # total_loss = total_loss + loc_loss1 + tf.stop_gradient(loc_loss2)
 
     # Create a tensor named cross_entropy for logging purposes.
-    tf.identity(cross_entropy, name='cross_entropy')
-    tf.summary.scalar('cross_entropy', cross_entropy)
     tf.identity(loc_loss1, name='loc_loss1')
     tf.summary.scalar('loc_loss1', loc_loss1)
     tf.identity(loc_loss2, name='loc_loss2')
@@ -525,7 +446,7 @@ def main(_):
         })
     tensors_to_log = {
         'lr': 'learning_rate',
-        'loss-ce': 'cross_entropy',
+        # 'loss-ce': 'cross_entropy',
         'loss-loc1': 'loc_loss1',
         'loss-loc2': 'loc_loss2',
         'total-loss': 'total_loss'
