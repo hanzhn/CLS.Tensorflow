@@ -78,8 +78,11 @@ tf.app.flags.DEFINE_integer(
     'resnet_size', 18,
     'The layers of used resnet, [4,6,10,14,18,34,50,101,152,200].')
 tf.app.flags.DEFINE_boolean(
-    'attention_block', True,
+    'attention_block', False,
     'Use attention or not. True/False')
+tf.app.flags.DEFINE_boolean(
+    'cls_block', False,
+    'Use cls block or not. True/False')
 tf.app.flags.DEFINE_boolean(
     'regression_block', True,
     'Use regression_block or not. True/False')
@@ -282,7 +285,7 @@ def input_pipeline(dataset_pattern='train-*', is_training=True, batch_size=FLAGS
         image_preprocessing_fn = lambda image_, label_: cls_preprocessing.preprocess_image(image_, label_, target_shape, 
                                                                     is_training=is_training, data_format=FLAGS.data_format, 
                                                                     output_rgb=False)
-        if FLAGS.regression_block:
+        if FLAGS.regression_block and FLAGS.cls_block:
             _batch_size = int(batch_size/2)
             print('Use cls and reg, so the batch size of each task is {}'.format(_batch_size))
             image1, _, cls_targets1, points1, is_reg1 = dataset_common.slim_get_batch(
@@ -309,19 +312,32 @@ def input_pipeline(dataset_pattern='train-*', is_training=True, batch_size=FLAGS
                                                             tf.concat([cls_targets1, cls_targets2],axis=0),
                                                             tf.concat([points1, points2],axis=0),
                                                             tf.concat([is_reg1, is_reg2],axis=0),]
-        else:
+        elif FLAGS.cls_block:
             _batch_size = batch_size
             image, _, cls_targets, points, is_reg = dataset_common.slim_get_batch(
                                                             FLAGS.num_classes,
                                                             _batch_size,
                                                             ('train' if is_training else 'val'),
-                                                            os.path.join(FLAGS.data_dir, dataset_pattern),
+                                                            os.path.join(FLAGS.data_dir, FLAGS.cls_data_dir,  dataset_pattern),
                                                             FLAGS.num_readers,
                                                             FLAGS.num_preprocessing_threads,
                                                             image_preprocessing_fn,
                                                             num_epochs=FLAGS.train_epochs,
                                                             is_training=is_training)
-
+        elif FLAGS.regression_block:
+            _batch_size = batch_size
+            image, _, cls_targets, points, is_reg = dataset_common.slim_get_batch(
+                                                            FLAGS.num_classes,
+                                                            _batch_size,
+                                                            ('train' if is_training else 'val'),
+                                                            os.path.join(FLAGS.data_dir, FLAGS.reg_data_dir,  dataset_pattern),
+                                                            FLAGS.num_readers,
+                                                            FLAGS.num_preprocessing_threads,
+                                                            image_preprocessing_fn,
+                                                            num_epochs=FLAGS.train_epochs,
+                                                            is_training=is_training)
+        else:
+            exit('Can not make cls and reg both False!')
         return image, {'cls_targets': cls_targets, 'loc_targets': points, 'is_reg': is_reg}
         # return image, {'cls_targets': cls_targets, 'loc_targets': tf.squeeze(points,axis=-1), 'is_reg': is_reg}
     return input_fn
@@ -359,26 +375,25 @@ def ssd_model_fn(features, labels, mode, params):
                                 FLAGS.attention_block, FLAGS.regression_block, FLAGS.location_feature_stage, FLAGS.location_feature_stage_2, FLAGS.data_format)
 
         results = model(features, mode == tf.estimator.ModeKeys.TRAIN)
-        if FLAGS.regression_block:
-            logits, loc, location = results
-        else:
-            logits = results
+        logits, loc = results
 
-    if mode == tf.estimator.ModeKeys.TRAIN:
-        if FLAGS.checkpoint_path:
-            init_variables_from_checkpoint(FLAGS.checkpoint_exclude_scopes)
-
-    # This acts as a no-op if the logits are already in fp32 (provided logits are
-    # not a SparseTensor). If dtype is is low precision, logits must be cast to
-    # fp32 for numerical stability.
-    logits = tf.cast(logits, tf.float32)
-
-    predictions = {
-        'classes': tf.argmax(logits, axis=1),
-        'probabilities': tf.nn.softmax(logits, name='softmax_tensor')
-    }
     if mode == tf.estimator.ModeKeys.PREDICT:
         # Return the predictions and the specification for serving a SavedModel
+        if FLAGS.cls_block:
+            # This acts as a no-op if the logits are already in fp32 (provided logits are
+            # not a SparseTensor). If dtype is is low precision, logits must be cast to
+            # fp32 for numerical stability.
+            logits = tf.cast(logits, tf.float32)
+            predictions = {
+                'classes': tf.argmax(logits, axis=1),
+                'probabilities': tf.nn.softmax(logits, name='softmax_tensor')
+            }
+        if FLAGS.regression_block:
+            # This acts as a no-op if the logits are already in fp32 (provided logits are
+            # not a SparseTensor). If dtype is is low precision, logits must be cast to
+            # fp32 for numerical stability.
+            logits = tf.cast(logits, tf.float32)
+            predictions['loc'] = loc
         return tf.estimator.EstimatorSpec(
             mode=mode,
             predictions=predictions,
@@ -386,83 +401,79 @@ def ssd_model_fn(features, labels, mode, params):
                 'predict': tf.estimator.export.PredictOutput(predictions)
             })
 
-    with tf.variable_scope('losses'):
-        loss_weights = parse_comma_list(FLAGS.loss_weights)
-        with tf.variable_scope('cls_loss'):
-            if FLAGS.regression_block:
-                weights = 1 - is_reg
-                cls_targets = tf.expand_dims(weights,axis=-1) * cls_targets
-            else:
-                weights = 1.0
-
-            # print_op1 = tf.print("cls:", logits, cls_targets, output_stream=sys.stdout)
-            # with tf.control_dependencies([print_op1]):
-            # Calculate loss, which includes softmax cross entropy and L2 regularization.
-            cross_entropy = tf.losses.sparse_softmax_cross_entropy(
-                logits=logits, labels=cls_targets, weights=weights) * loss_weights[0]
-        total_loss = cross_entropy 
-            
-        if FLAGS.regression_block:
-            if FLAGS.location_feature_stage_2:
-                with tf.variable_scope('DSNT'):
-                    inputs_shape_hw = int(FLAGS.train_image_size / 2 *2/7)
-                    kernel = np.arange(inputs_shape_hw)
-                    kernel = kernel / (inputs_shape_hw-1.) - 0.5
-                    X = np.tile(kernel, [inputs_shape_hw, 1])
-                    Y = np.transpose(X, [1,0])
-                    # channel_last format
-                    X = np.reshape(X, [1, -1, 1])
-                    Y = np.reshape(Y, [1, -1, 1])
-
-                    eyes = []
-                    for i, inputs in enumerate(location):
-                        # inputs: channel_last format
-                        inputs = tf.reshape(inputs, [-1, inputs_shape_hw**2, 9])
-                        inputs = tf.nn.softmax(inputs, 1)
-                        # print(X, inputs)
-                        if i == 1:
-                            # All the right xs will be fliped, because of the flip.
-                            xs = tf.reduce_sum(X*inputs, 1, keepdims=True) * (-1) #B*1*C
-                            ys = tf.reduce_sum(Y*inputs, 1, keepdims=True) #B*1*C
-                        elif i ==0:
-                            xs = tf.reduce_sum(X*inputs, 1, keepdims=True) #B*1*C
-                            ys = tf.reduce_sum(Y*inputs, 1, keepdims=True) #B*1*C
-                        eyes.append( tf.concat([ys,xs], 1) )                #B*2*C
-                    location = tf.concat(eyes, 1)   # B*4*C
-
-            weights = tf.expand_dims(is_reg,axis=-1)
-            # weights = tf.concat([tf.zeros([int(FLAGS.batch_size/2)]), tf.ones(int(FLAGS.batch_size/2))], axis=0)
-            # print_op2 = tf.print("reg:", loc,location,loc_targets, output_stream=sys.stdout)
-            # with tf.control_dependencies([print_op2]):
-            with tf.variable_scope('reg_loss'):
-                # coarse_label = loc_targets[:,:,-1] # b*[ly, lx, ry, rx]
-                # loc_loss1 = tf.losses.absolute_difference(
-                #     labels=coarse_label, predictions=loc, weights=weights) * loss_weights[1]
-
-                # loc_stop = tf.stop_gradient(loc)
-                # location_final = tf.expand_dims(loc_stop,-1) + 2/7*location
-                loc_loss1 = tf.losses.absolute_difference(
-                    labels=tf.reshape(loc_targets,[-1,36]), predictions=tf.reshape(loc,[-1,36]), 
-                    weights=weights) * loss_weights[1]
-            # print_op3 = tf.print("loss:", total_loss, loc_loss1, loc_loss2, output_stream=sys.stdout)
-            # with tf.control_dependencies([print_op3]):
-
-            # Reset the total_loss.
-            total_loss = (total_loss) + (loc_loss1)
-            # total_loss = tf.stop_gradient(total_loss) + tf.stop_gradient(loc_loss1) + loc_loss2
-            # total_loss = total_loss + loc_loss1 + tf.stop_gradient(loc_loss2)
-
-    # Create a tensor named cross_entropy for logging purposes.
-    tf.identity(cross_entropy, name='cross_entropy')
-    tf.summary.scalar('cross_entropy', cross_entropy)
-    tf.identity(loc_loss1, name='loc_loss1')
-    tf.summary.scalar('loc_loss1', loc_loss1)
-    # tf.identity(loc_loss2, name='loc_loss2')
-    # tf.summary.scalar('loc_loss2', loc_loss2)
-    tf.identity(total_loss, name='total_loss')
-    tf.summary.scalar('total_loss', total_loss)
-
     if mode == tf.estimator.ModeKeys.TRAIN:
+        with tf.variable_scope('losses'):
+            loss_weights = parse_comma_list(FLAGS.loss_weights)
+            if FLAGS.cls_block:
+                with tf.variable_scope('cls_loss'):
+                    if FLAGS.regression_block and FLAGS.cls_block:
+                        weights = 1 - is_reg
+                        cls_targets = tf.expand_dims(weights,axis=-1) * cls_targets
+                    else:
+                        weights = 1.0
+                    # print_op1 = tf.print("cls:", logits, cls_targets, output_stream=sys.stdout)
+                    # with tf.control_dependencies([print_op1]):
+                    # Calculate loss, which includes softmax cross entropy and L2 regularization.
+                    cross_entropy = tf.losses.sparse_softmax_cross_entropy(
+                        logits=logits, labels=cls_targets, weights=weights) * loss_weights[0]
+                cls_loss = cross_entropy
+                
+            if FLAGS.regression_block:
+                # if FLAGS.location_feature_stage_2:
+                #     with tf.variable_scope('DSNT'):
+                #         inputs_shape_hw = int(FLAGS.train_image_size / 2 *2/7)
+                #         kernel = np.arange(inputs_shape_hw)
+                #         kernel = kernel / (inputs_shape_hw-1.) - 0.5
+                #         X = np.tile(kernel, [inputs_shape_hw, 1])
+                #         Y = np.transpose(X, [1,0])
+                #         # channel_last format
+                #         X = np.reshape(X, [1, -1, 1])
+                #         Y = np.reshape(Y, [1, -1, 1])
+                #         eyes = []
+                #         for i, inputs in enumerate(location):
+                #             # inputs: channel_last format
+                #             inputs = tf.reshape(inputs, [-1, inputs_shape_hw**2, 9])
+                #             inputs = tf.nn.softmax(inputs, 1)
+                #             # print(X, inputs)
+                #             if i == 1:
+                #                 # All the right xs will be fliped, because of the flip.
+                #                 xs = tf.reduce_sum(X*inputs, 1, keepdims=True) * (-1) #B*1*C
+                #                 ys = tf.reduce_sum(Y*inputs, 1, keepdims=True) #B*1*C
+                #             elif i ==0:
+                #                 xs = tf.reduce_sum(X*inputs, 1, keepdims=True) #B*1*C
+                #                 ys = tf.reduce_sum(Y*inputs, 1, keepdims=True) #B*1*C
+                #             eyes.append( tf.concat([ys,xs], 1) )                #B*2*C
+                #         location = tf.concat(eyes, 1)   # B*4*C
+
+                # print_op2 = tf.print("reg:", loc,location,loc_targets, output_stream=sys.stdout)
+                # with tf.control_dependencies([print_op2]):
+                with tf.variable_scope('reg_loss'):
+                    weights = tf.expand_dims(is_reg,axis=-1)
+                    print(loc_targets)
+                    loc_loss1 = tf.losses.absolute_difference(labels=tf.reshape(loc_targets,[-1,36]),
+                                                            predictions=tf.reshape(loc,[-1,36]), 
+                                                            weights=weights) * loss_weights[1]
+                # print_op3 = tf.print("loss:", total_loss, loc_loss1, loc_loss2, output_stream=sys.stdout)
+                # with tf.control_dependencies([print_op3]):
+                reg_loss = loc_loss1
+            total_loss = cls_loss + reg_loss
+
+        if FLAGS.cls_block:
+            # Create a tensor named cross_entropy for logging purposes.
+            tf.identity(cross_entropy, name='cross_entropy')
+            tf.summary.scalar('cross_entropy', cross_entropy)
+        if FLAGS.regression_block:
+            tf.identity(loc_loss1, name='loc_loss1')
+            tf.summary.scalar('loc_loss1', loc_loss1)
+            # tf.identity(loc_loss2, name='loc_loss2')
+            # tf.summary.scalar('loc_loss2', loc_loss2)
+        tf.identity(total_loss, name='total_loss')
+        tf.summary.scalar('total_loss', total_loss)
+
+        # Other settings above
+        if FLAGS.checkpoint_path:
+            init_variables_from_checkpoint(FLAGS.checkpoint_exclude_scopes)
+
         global_step = tf.train.get_or_create_global_step()
 
         lr_values = [params['learning_rate'] * decay for decay in params['lr_decay_factors']]

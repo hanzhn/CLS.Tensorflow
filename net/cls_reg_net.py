@@ -739,36 +739,53 @@ class Model(object):
         # The last feature map must be applied attention if possible.
         self.blocks_feature[-1]=self.attentioned_feature
 
-    with tf.variable_scope('CLS'):
-      # The current top layer has shape
-      # `batch_size x pool_size x pool_size x final_size`.
-      # ResNet does an Average Pooling layer over pool_size,
-      # but that is the same as doing a reduce_mean. We do a reduce_mean
-      # here because it performs better than AveragePooling2D.
-      axes = [2, 3] if self.data_format == 'channels_first' else [1, 2]
-      inputs = tf.reduce_mean(inputs, axes, keepdims=True)
-      inputs = tf.identity(inputs, 'final_reduce_mean')
+    final_cls_dense, loc = None, None
+    # classify the openess
+    if self.is_classify:
+      with tf.variable_scope('CLS'):
+        # The current top layer has shape
+        # `batch_size x pool_size x pool_size x final_size`.
+        # ResNet does an Average Pooling layer over pool_size,
+        # but that is the same as doing a reduce_mean. We do a reduce_mean
+        # here because it performs better than AveragePooling2D.
+        axes = [2, 3] if self.data_format == 'channels_first' else [1, 2]
+        inputs = tf.reduce_mean(inputs, axes, keepdims=True)
+        inputs = tf.identity(inputs, 'final_reduce_mean')
 
-      inputs = tf.squeeze(inputs, axes)
-      inputs = tf.layers.dense(inputs=inputs, units=self.num_classes)
-      final_cls_dense = tf.identity(inputs, 'final_dense')
+        inputs = tf.squeeze(inputs, axes)
+        inputs = tf.layers.dense(inputs=inputs, units=self.num_classes)
+        final_cls_dense = tf.identity(inputs, 'final_dense')
 
     # regression the loc
     if self.is_attention and self.is_regression:
       with tf.variable_scope('REG'):
-        if self.location_feature_stage is not None:
-          lower_feature = self.blocks_feature[self.location_feature_stage]
-        else:
-          lower_feature = None
-        loc = regression_first_stage(self.attentioned_feature, lower_feature, 18, training, self.data_format)
-        location = None
-        if self.is_regression_2:
-          exit('Not finished here!')
-          lower_feature_2 = self.blocks_feature[self.location_feature_stage_2]
-          loc, location = regression_points(self.attentioned_feature, lower_feature_2, 2, training, self.data_format)
-      return final_cls_dense, loc, location
+        # The current top layer has shape
+        # `batch_size x pool_size x pool_size x final_size`.
+        # ResNet does an Average Pooling layer over pool_size,
+        # but that is the same as doing a reduce_mean. We do a reduce_mean
+        # here because it performs better than AveragePooling2D.
+        inputs = self.blocks_feature[-1]
+        axes = [2, 3] if self.data_format == 'channels_first' else [1, 2]
+        inputs = tf.reduce_mean(inputs, axes, keepdims=True)
+        inputs = tf.identity(inputs, 'final_reduce_mean_reg')
+
+        inputs = tf.squeeze(inputs, axes)
+        inputs = tf.layers.dense(inputs=inputs, units=self.num_classes)
+        loc = tf.identity(inputs, 'final_dense_reg')
+
+        # if self.location_feature_stage is not None:
+        #   lower_feature = self.blocks_feature[self.location_feature_stage]
+        # else:
+        #   lower_feature = None
+        # loc = regression_first_stage(self.attentioned_feature, lower_feature, 18, training, self.data_format)
+        # location = None
+        # if self.is_regression_2:
+        #   exit('Not finished here!')
+        #   lower_feature_2 = self.blocks_feature[self.location_feature_stage_2]
+        #   loc, location = regression_points(self.attentioned_feature, lower_feature_2, 2, training, self.data_format)
+        # return final_cls_dense, loc, location
     # If don't regress.
-    return final_cls_dense
+    return final_cls_dense, loc
 
 
 def _get_block_sizes(resnet_size):
